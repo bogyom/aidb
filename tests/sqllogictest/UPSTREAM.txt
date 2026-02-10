@@ -1,0 +1,5 @@
+Source: https://www.sqlite.org/sqllogictest
+Fossil checkout: 389f028260ab1c6556c8e77069bc65508213d84e
+Checkout date: 2025-11-03 16:20:39 UTC
+Tag: trunk
+Comment: Update the built-in SQLite to the latest 3.51.0 beta.
