@@ -1,0 +1,5 @@
+.autocoder/logs/
+.autocoder/traces/
+.autocoder/config.local.yaml
+.autocoder/config.yaml
+.autocoder/epics/
