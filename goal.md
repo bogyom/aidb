@@ -1,5 +1,5 @@
 # Goal
-Build a fully functional database engine in Rust with SQLite-level core capabilities, plus a REST server and CLI.
+Build a fully functional database engine in Rust with SQLite-level core capabilities, plus a REST server and a CLI that is based on (and talks to) the service. One service instance should be able to serve multiple CLIs and other clients.
 
 ## Constraints
 - Implement the core database engine in Rust.
@@ -27,9 +27,10 @@ Use the official SQLite `sqllogictest` repository test set. The suite is defined
 ## Acceptance criteria (done = all true)
 - `cargo build` succeeds on a clean checkout.
 - `sqllogictest-rs` runs against *all* `.test` files under `tests/sqllogictest/test/` and passes 100%.
-- REST server exposes an API to execute SQL and returns results/errors in JSON.
+- REST server exposes an API to execute SQL and returns results/errors in JSON. 
+- The service must support multiple concurrent clients (e.g., multiple CLIs and other clients).
 - REST API publishes Swagger UI and the OpenAPI spec at documented endpoints.
-- CLI can execute SQL statements (interactive and single-command modes).
+- CLI can execute SQL statements (interactive and single-command modes) by calling the REST service API; 
 
 ## Minimal file-based backend requirements (SQLite-aligned, rollback-journal)
 - Storage: data persists to a single on-disk database file; create/open semantics are supported.
