@@ -1,3 +1,21 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Cargo specific
+Cargo.lock
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local tooling (if present)
 .autocoder/logs/
 .autocoder/traces/
 .autocoder/config.local.yaml

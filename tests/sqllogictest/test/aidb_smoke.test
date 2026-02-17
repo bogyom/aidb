@@ -1,0 +1,12 @@
+# AIDB smoke tests for sqllogictest harness.
+
+statement ok
+CREATE TABLE t1(id INTEGER)
+
+statement ok
+INSERT INTO t1(id) VALUES(1)
+
+query I
+SELECT 1;
+----
+1
