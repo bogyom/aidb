@@ -1,0 +1,14 @@
+name: csv-import-parse-tests
+
+description: >
+  Add unit tests for CSV parsing (delimiters, quotes, escapes, header).
+
+story_points: 2
+
+acceptence_critria:
+  - Tests cover delimiter/quote/escape variations
+  - Tests cover header present/absent
+  - All tests pass
+
+deppends_on:
+  - task_00120

@@ -1,0 +1,14 @@
+name: csv-import-null-rules
+
+description: >
+  Define and enforce NULL/empty-field rules.
+
+story_points: 2
+
+acceptence_critria:
+  - NULL token and empty-field behavior implemented
+  - NULL conversion respects column nullability
+  - Unit tests cover NULL handling
+
+deppends_on:
+  - task_00122

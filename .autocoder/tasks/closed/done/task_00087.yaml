@@ -1,0 +1,15 @@
+name: groupby-validate
+
+description: >
+  Validate GROUP BY keys and HAVING expressions against catalog and aliases.
+
+story_points: 3
+
+acceptence_critria:
+  - GROUP BY keys resolve to valid columns or expressions
+  - HAVING expressions validate against available columns/aliases
+  - Validation errors are surfaced with actionable messages
+
+deppends_on:
+  - task_00080
+  - task_00081

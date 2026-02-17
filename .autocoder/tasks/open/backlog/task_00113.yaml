@@ -1,0 +1,14 @@
+name: unique-index-constraint
+
+description: >
+  Implement unique index constraint checks on INSERT/UPDATE.
+
+story_points: 3
+
+acceptence_critria:
+  - INSERT fails on duplicate unique key
+  - UPDATE fails on duplicate unique key
+  - Unit tests cover unique constraint
+
+deppends_on:
+  - 

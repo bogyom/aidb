@@ -91,3 +91,18 @@ fn sqllogictest_runs_select4_file() {
         .db_mut()
         .emit_slowest_summary("select4.test", 10);
 }
+
+#[test]
+fn sqllogictest_runs_select5_file() {
+    let db_path = temp_db_path();
+    let mut runner = Runner::new(SltDatabase::create(db_path.to_string_lossy().as_ref()).unwrap());
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let test_file = manifest
+        .join("..")
+        .join("tests")
+        .join("sqllogictest")
+        .join("test")
+        .join("select5.test");
+
+    runner.run_file(test_file).expect("run select5 test");
+}

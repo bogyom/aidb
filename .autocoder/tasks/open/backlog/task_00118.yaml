@@ -1,0 +1,14 @@
+name: csv-import-options
+
+description: >
+  Specify import options (delimiter, quote, escape, header, null, columns, batch size, mode).
+
+story_points: 2
+
+acceptence_critria:
+  - All import options enumerated with defaults
+  - Options mapped to CLI flags and API fields
+  - Validation rules documented
+
+deppends_on:
+  - 

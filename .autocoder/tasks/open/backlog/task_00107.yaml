@@ -1,0 +1,14 @@
+name: index-maintenance-insert
+
+description: >
+  Update INSERT to add index entries for affected indexes.
+
+story_points: 3
+
+acceptence_critria:
+  - INSERT updates all relevant indexes
+  - Index entries match table row values
+  - Unit tests cover insert index maintenance
+
+deppends_on:
+  - 

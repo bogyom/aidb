@@ -1,0 +1,14 @@
+name: csv-import-perf-test
+
+description: >
+  Add large-file import performance test (batching + memory use).
+
+story_points: 2
+
+acceptence_critria:
+  - Large-file import completes within expected time
+  - Memory usage remains bounded
+  - Test runs under timeout
+
+deppends_on:
+  - task_00124

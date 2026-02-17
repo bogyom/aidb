@@ -1,0 +1,14 @@
+name: csv-import-transaction-strategy
+
+description: >
+  Implement import transaction strategy (single tx vs per-batch) toggle.
+
+story_points: 3
+
+acceptence_critria:
+  - Single-transaction and per-batch modes supported
+  - Failure behavior documented
+  - Unit tests cover both modes
+
+deppends_on:
+  - task_00124

@@ -1,0 +1,13 @@
+name: cross-join-groupby
+
+description: >
+  Support CROSS JOIN syntax (or map to existing join path) in grouped queries.
+
+story_points: 2
+
+acceptence_critria:
+  - CROSS JOIN parses and executes like comma join
+  - Grouping works with CROSS JOIN sources
+  - Unit tests cover CROSS JOIN with GROUP BY
+
+deppends_on: []

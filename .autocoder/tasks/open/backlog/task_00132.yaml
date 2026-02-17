@@ -1,0 +1,14 @@
+name: csv-import-integration-test
+
+description: >
+  Add integration tests for import end-to-end.
+
+story_points: 2
+
+acceptence_critria:
+  - Integration test imports CSV via API
+  - Results validated with SELECT queries
+  - Runs under timeout
+
+deppends_on:
+  - task_00124

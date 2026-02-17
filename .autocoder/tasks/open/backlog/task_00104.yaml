@@ -1,0 +1,14 @@
+name: create-index-build
+
+description: >
+  Execute CREATE INDEX: scan table rows and build index pages.
+
+story_points: 4
+
+acceptence_critria:
+  - CREATE INDEX builds entries for existing rows
+  - Index pages are created and linked correctly
+  - Unit tests cover CREATE INDEX build
+
+deppends_on:
+  - 

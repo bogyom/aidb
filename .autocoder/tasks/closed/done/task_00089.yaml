@@ -1,0 +1,13 @@
+name: aggregates-core
+
+description: >
+  Implement COUNT, SUM, AVG, MIN, MAX over grouped inputs.
+
+story_points: 4
+
+acceptence_critria:
+  - Aggregate functions compute correct results per group
+  - NULL handling matches SQL expectations
+  - Unit tests cover each aggregate function
+
+deppends_on: []

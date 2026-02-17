@@ -1,8 +1,9 @@
-use super::parser::SetOp;
+use super::parser::{CastType, FunctionModifier, SetOp};
 use super::planner::{
     BinaryOp, ExprPlan, FunctionArgPlan, OrderByPlan, PlanNode, ProjectionItem, UnaryOp,
 };
 use crate::{ColumnMeta, EngineError, Value};
+use std::cmp::Ordering;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecResult {
@@ -39,6 +40,7 @@ pub fn execute_plan(plan: &PlanNode, db: &crate::Database) -> Result<ExecResult,
             result.rows = filtered;
             Ok(result)
         }
+        PlanNode::GroupBy { .. } | PlanNode::Having { .. } => Err(EngineError::InvalidSql),
         PlanNode::Order { by, input } => {
             let mut result = execute_plan(input, db)?;
             apply_order(&mut result.rows, by)?;
@@ -209,21 +211,41 @@ fn project_rows(
 
 fn eval_aggregate(expr: &ExprPlan, rows: &[Vec<Value>]) -> Result<Value, EngineError> {
     match expr {
-        ExprPlan::Function { name, args } => {
+        ExprPlan::Function {
+            name,
+            modifier,
+            args,
+        } => {
             let name = name.to_ascii_lowercase();
+            let distinct = matches!(modifier, FunctionModifier::Distinct);
             if name == "count" {
                 if args.len() != 1 {
                     return Err(EngineError::InvalidSql);
                 }
                 match &args[0] {
-                    FunctionArgPlan::Star => Ok(Value::Integer(rows.len() as i64)),
+                    FunctionArgPlan::Star => {
+                        if distinct {
+                            Err(EngineError::InvalidSql)
+                        } else {
+                            Ok(Value::Integer(rows.len() as i64))
+                        }
+                    }
                     FunctionArgPlan::Expr(expr) => {
                         let mut count = 0_i64;
+                        let mut seen: Vec<Value> = Vec::new();
                         for row in rows {
                             let value = eval_expr(expr, row)?;
-                            if !matches!(value, Value::Null) {
-                                count += 1;
+                            if matches!(value, Value::Null) {
+                                continue;
                             }
+                            if distinct && seen.iter().any(|existing| values_equal(existing, &value))
+                            {
+                                continue;
+                            }
+                            if distinct {
+                                seen.push(value.clone());
+                            }
+                            count += 1;
                         }
                         Ok(Value::Integer(count))
                     }
@@ -236,10 +258,18 @@ fn eval_aggregate(expr: &ExprPlan, rows: &[Vec<Value>]) -> Result<Value, EngineE
                     FunctionArgPlan::Expr(expr) => {
                         let mut sum = 0.0;
                         let mut count = 0_i64;
+                        let mut seen: Vec<Value> = Vec::new();
                         for row in rows {
                             let value = eval_expr(expr, row)?;
                             if matches!(value, Value::Null) {
                                 continue;
+                            }
+                            if distinct && seen.iter().any(|existing| values_equal(existing, &value))
+                            {
+                                continue;
+                            }
+                            if distinct {
+                                seen.push(value.clone());
                             }
                             let numeric = value_to_f64(value).ok_or(EngineError::InvalidSql)?;
                             sum += numeric;
@@ -250,6 +280,99 @@ fn eval_aggregate(expr: &ExprPlan, rows: &[Vec<Value>]) -> Result<Value, EngineE
                         } else {
                             Ok(Value::Real(sum / count as f64))
                         }
+                    }
+                    FunctionArgPlan::Star => Err(EngineError::InvalidSql),
+                }
+            } else if name == "sum" {
+                if args.len() != 1 {
+                    return Err(EngineError::InvalidSql);
+                }
+                match &args[0] {
+                    FunctionArgPlan::Expr(expr) => {
+                        let mut total: Option<Value> = None;
+                        let mut seen: Vec<Value> = Vec::new();
+                        for row in rows {
+                            let value = eval_expr(expr, row)?;
+                            if matches!(value, Value::Null) {
+                                continue;
+                            }
+                            if distinct && seen.iter().any(|existing| values_equal(existing, &value))
+                            {
+                                continue;
+                            }
+                            if distinct {
+                                seen.push(value.clone());
+                            }
+                            total = match total {
+                                Some(existing) => Some(numeric_add(existing, value)?),
+                                None => Some(value),
+                            };
+                        }
+                        Ok(total.unwrap_or(Value::Null))
+                    }
+                    FunctionArgPlan::Star => Err(EngineError::InvalidSql),
+                }
+            } else if name == "min" {
+                if args.len() != 1 {
+                    return Err(EngineError::InvalidSql);
+                }
+                match &args[0] {
+                    FunctionArgPlan::Expr(expr) => {
+                        let mut current: Option<Value> = None;
+                        let mut seen: Vec<Value> = Vec::new();
+                        for row in rows {
+                            let value = eval_expr(expr, row)?;
+                            if matches!(value, Value::Null) {
+                                continue;
+                            }
+                            if distinct && seen.iter().any(|existing| values_equal(existing, &value))
+                            {
+                                continue;
+                            }
+                            if distinct {
+                                seen.push(value.clone());
+                            }
+                            let replace = match current.as_ref() {
+                                None => true,
+                                Some(existing) => value_cmp(&value, existing) == Ordering::Less,
+                            };
+                            if replace {
+                                current = Some(value);
+                            }
+                        }
+                        Ok(current.unwrap_or(Value::Null))
+                    }
+                    FunctionArgPlan::Star => Err(EngineError::InvalidSql),
+                }
+            } else if name == "max" {
+                if args.len() != 1 {
+                    return Err(EngineError::InvalidSql);
+                }
+                match &args[0] {
+                    FunctionArgPlan::Expr(expr) => {
+                        let mut current: Option<Value> = None;
+                        let mut seen: Vec<Value> = Vec::new();
+                        for row in rows {
+                            let value = eval_expr(expr, row)?;
+                            if matches!(value, Value::Null) {
+                                continue;
+                            }
+                            if distinct && seen.iter().any(|existing| values_equal(existing, &value))
+                            {
+                                continue;
+                            }
+                            if distinct {
+                                seen.push(value.clone());
+                            }
+                            let replace = match current.as_ref() {
+                                None => true,
+                                Some(existing) => value_cmp(&value, existing) == Ordering::Greater,
+                            };
+                            if replace {
+                                current = Some(value);
+                            }
+                        }
+                        Ok(current.unwrap_or(Value::Null))
                     }
                     FunctionArgPlan::Star => Err(EngineError::InvalidSql),
                 }
@@ -320,7 +443,12 @@ fn eval_expr(expr: &ExprPlan, row: &[Value]) -> Result<Value, EngineError> {
                     _ => Err(EngineError::InvalidSql),
                 },
                 UnaryOp::Neg => numeric_negate(value),
+                UnaryOp::Pos => numeric_positive(value),
             }
+        }
+        ExprPlan::Cast { expr, ty } => {
+            let value = eval_expr(expr, row)?;
+            cast_numeric(value, *ty)
         }
         ExprPlan::Binary { left, op, right } => {
             let left_value = eval_expr(left, row)?;
@@ -350,6 +478,7 @@ fn eval_expr(expr: &ExprPlan, row: &[Value]) -> Result<Value, EngineError> {
                 BinaryOp::Sub => numeric_sub(left_value, right_value),
                 BinaryOp::Mul => numeric_mul(left_value, right_value),
                 BinaryOp::Div => numeric_div(left_value, right_value),
+                BinaryOp::DivInt => numeric_div_int(left_value, right_value),
             }
         }
         ExprPlan::Between {
@@ -430,7 +559,14 @@ fn eval_expr(expr: &ExprPlan, row: &[Value]) -> Result<Value, EngineError> {
                 Ok(Value::Null)
             }
         }
-        ExprPlan::Function { name, args } => {
+        ExprPlan::Function {
+            name,
+            modifier,
+            args,
+        } => {
+            if matches!(modifier, FunctionModifier::Distinct) {
+                return Err(EngineError::InvalidSql);
+            }
             let name = name.to_ascii_lowercase();
             if name == "abs" {
                 if args.len() != 1 {
@@ -453,6 +589,29 @@ fn eval_expr(expr: &ExprPlan, row: &[Value]) -> Result<Value, EngineError> {
                     }
                 }
                 Ok(Value::Null)
+            } else if name == "nullif" {
+                if args.len() != 2 {
+                    return Err(EngineError::InvalidSql);
+                }
+                let first = match &args[0] {
+                    FunctionArgPlan::Expr(expr) => eval_expr(expr, row)?,
+                    FunctionArgPlan::Star => return Err(EngineError::InvalidSql),
+                };
+                if matches!(first, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                let second = match &args[1] {
+                    FunctionArgPlan::Expr(expr) => eval_expr(expr, row)?,
+                    FunctionArgPlan::Star => return Err(EngineError::InvalidSql),
+                };
+                if matches!(second, Value::Null) {
+                    return Ok(first);
+                }
+                if values_equal(&first, &second) {
+                    Ok(Value::Null)
+                } else {
+                    Ok(first)
+                }
             } else {
                 Err(EngineError::InvalidSql)
             }
@@ -533,6 +692,40 @@ fn numeric_negate(value: Value) -> Result<Value, EngineError> {
     }
 }
 
+fn numeric_positive(value: Value) -> Result<Value, EngineError> {
+    match value {
+        Value::Integer(value) => Ok(Value::Integer(value)),
+        Value::Real(value) => Ok(Value::Real(value)),
+        Value::Null => Ok(Value::Null),
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
+fn cast_numeric(value: Value, ty: CastType) -> Result<Value, EngineError> {
+    match ty {
+        CastType::Signed | CastType::Integer => cast_to_integer(value),
+        CastType::Decimal | CastType::Real => cast_to_real(value),
+    }
+}
+
+fn cast_to_integer(value: Value) -> Result<Value, EngineError> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Integer(value) => Ok(Value::Integer(value)),
+        Value::Real(value) => Ok(Value::Integer(value.trunc() as i64)),
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
+fn cast_to_real(value: Value) -> Result<Value, EngineError> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Integer(value) => Ok(Value::Real(value as f64)),
+        Value::Real(value) => Ok(Value::Real(value)),
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
 fn numeric_abs(value: Value) -> Result<Value, EngineError> {
     match value {
         Value::Integer(value) => Ok(Value::Integer(value.abs())),
@@ -584,6 +777,39 @@ fn numeric_div(left: Value, right: Value) -> Result<Value, EngineError> {
                 return Err(EngineError::InvalidSql);
             }
             Ok(Value::Real(a / b))
+        }
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
+fn numeric_div_int(left: Value, right: Value) -> Result<Value, EngineError> {
+    match (left, right) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+        (Value::Integer(a), Value::Integer(b)) => {
+            if b == 0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Integer(a / b))
+        }
+        (Value::Integer(a), Value::Real(b)) => {
+            let b_int = b.trunc() as i64;
+            if b_int == 0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Integer(a / b_int))
+        }
+        (Value::Real(a), Value::Integer(b)) => {
+            if b == 0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Integer(a.trunc() as i64 / b))
+        }
+        (Value::Real(a), Value::Real(b)) => {
+            let b_int = b.trunc() as i64;
+            if b_int == 0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Integer(a.trunc() as i64 / b_int))
         }
         _ => Err(EngineError::InvalidSql),
     }
@@ -1055,6 +1281,7 @@ mod tests {
         let row = vec![];
         let expr = ExprPlan::Function {
             name: "abs".to_string(),
+            modifier: FunctionModifier::All,
             args: vec![FunctionArgPlan::Expr(ExprPlan::Literal(Value::Integer(-5)))],
         };
         let value = eval_expr(&expr, &row).expect("eval");
@@ -1062,6 +1289,7 @@ mod tests {
 
         let expr = ExprPlan::Function {
             name: "ABS".to_string(),
+            modifier: FunctionModifier::All,
             args: vec![FunctionArgPlan::Expr(ExprPlan::Literal(Value::Real(-3.5)))],
         };
         let value = eval_expr(&expr, &row).expect("eval");
@@ -1118,6 +1346,7 @@ mod tests {
         let row = vec![];
         let expr = ExprPlan::Function {
             name: "coalesce".to_string(),
+            modifier: FunctionModifier::All,
             args: vec![
                 FunctionArgPlan::Expr(ExprPlan::Literal(Value::Null)),
                 FunctionArgPlan::Expr(ExprPlan::Literal(Value::Integer(7))),
@@ -1129,6 +1358,7 @@ mod tests {
 
         let expr = ExprPlan::Function {
             name: "COALESCE".to_string(),
+            modifier: FunctionModifier::All,
             args: vec![
                 FunctionArgPlan::Expr(ExprPlan::Literal(Value::Null)),
                 FunctionArgPlan::Expr(ExprPlan::Literal(Value::Null)),
@@ -1136,6 +1366,54 @@ mod tests {
         };
         let value = eval_expr(&expr, &row).expect("eval");
         assert_eq!(value, Value::Null);
+    }
+
+    #[test]
+    fn nullif_returns_null_when_equal() {
+        let row = vec![];
+        let expr = ExprPlan::Function {
+            name: "NULLIF".to_string(),
+            modifier: FunctionModifier::All,
+            args: vec![
+                FunctionArgPlan::Expr(ExprPlan::Literal(Value::Integer(7))),
+                FunctionArgPlan::Expr(ExprPlan::Literal(Value::Integer(7))),
+            ],
+        };
+        let value = eval_expr(&expr, &row).expect("eval");
+        assert_eq!(value, Value::Null);
+
+        let expr = ExprPlan::Function {
+            name: "nullif".to_string(),
+            modifier: FunctionModifier::All,
+            args: vec![
+                FunctionArgPlan::Expr(ExprPlan::Literal(Value::Integer(7))),
+                FunctionArgPlan::Expr(ExprPlan::Literal(Value::Integer(9))),
+            ],
+        };
+        let value = eval_expr(&expr, &row).expect("eval");
+        assert_eq!(value, Value::Integer(7));
+
+        let expr = ExprPlan::Function {
+            name: "nullif".to_string(),
+            modifier: FunctionModifier::All,
+            args: vec![
+                FunctionArgPlan::Expr(ExprPlan::Literal(Value::Null)),
+                FunctionArgPlan::Expr(ExprPlan::Literal(Value::Integer(7))),
+            ],
+        };
+        let value = eval_expr(&expr, &row).expect("eval");
+        assert_eq!(value, Value::Null);
+
+        let expr = ExprPlan::Function {
+            name: "nullif".to_string(),
+            modifier: FunctionModifier::All,
+            args: vec![
+                FunctionArgPlan::Expr(ExprPlan::Literal(Value::Integer(7))),
+                FunctionArgPlan::Expr(ExprPlan::Literal(Value::Null)),
+            ],
+        };
+        let value = eval_expr(&expr, &row).expect("eval");
+        assert_eq!(value, Value::Integer(7));
     }
 
     #[test]
@@ -1170,6 +1448,7 @@ mod tests {
         let items = vec![ProjectionItem {
             expr: ExprPlan::Function {
                 name: "count".to_string(),
+                modifier: FunctionModifier::All,
                 args: vec![FunctionArgPlan::Star],
             },
             label: "count".to_string(),
@@ -1190,6 +1469,7 @@ mod tests {
         let items = vec![ProjectionItem {
             expr: ExprPlan::Function {
                 name: "avg".to_string(),
+                modifier: FunctionModifier::All,
                 args: vec![FunctionArgPlan::Expr(ExprPlan::Column(
                     super::super::planner::ColumnRef {
                         name: "id".to_string(),
@@ -1216,6 +1496,7 @@ mod tests {
         let items = vec![ProjectionItem {
             expr: ExprPlan::Function {
                 name: "AVG".to_string(),
+                modifier: FunctionModifier::All,
                 args: vec![FunctionArgPlan::Expr(ExprPlan::Column(
                     super::super::planner::ColumnRef {
                         name: "id".to_string(),

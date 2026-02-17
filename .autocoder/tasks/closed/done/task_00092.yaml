@@ -1,0 +1,15 @@
+name: groupby-exec
+
+description: >
+  Execute GROUP BY by building group keys and aggregate state per group.
+
+story_points: 5
+
+acceptence_critria:
+  - Grouped execution produces one row per group
+  - Aggregate state is maintained per group key
+  - Unit tests cover multiple group keys
+
+deppends_on:
+  - task_00088
+  - task_00089

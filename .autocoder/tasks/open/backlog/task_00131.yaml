@@ -1,0 +1,14 @@
+name: csv-import-validate-tests
+
+description: >
+  Add unit tests for row validation and type conversion.
+
+story_points: 2
+
+acceptence_critria:
+  - Tests cover arity validation
+  - Tests cover type conversion errors
+  - All tests pass
+
+deppends_on:
+  - task_00122

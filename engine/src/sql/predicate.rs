@@ -73,6 +73,7 @@ pub fn predicate_table_indices(
         },
         Expr::Literal(_) => Ok(Vec::new()),
         Expr::Unary { expr, .. } => predicate_table_indices(expr, tables),
+        Expr::Cast { expr, .. } => predicate_table_indices(expr, tables),
         Expr::Binary { left, right, .. } => {
             let mut indices = predicate_table_indices(left, tables)?;
             merge_indices(&mut indices, predicate_table_indices(right, tables)?);

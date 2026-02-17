@@ -1,0 +1,14 @@
+name: index-page-layout
+
+description: >
+  Define index page layout and entry encoding (key + row reference).
+
+story_points: 3
+
+acceptence_critria:
+  - Index page format is documented in code or docs
+  - Entry encoding supports composite keys if needed
+  - Unit tests cover encode/decode of index entries
+
+deppends_on:
+  - 

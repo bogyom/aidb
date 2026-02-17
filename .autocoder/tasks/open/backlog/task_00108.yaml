@@ -1,0 +1,14 @@
+name: index-maintenance-update
+
+description: >
+  Update UPDATE to delete/insert index entries for affected indexes.
+
+story_points: 4
+
+acceptence_critria:
+  - UPDATE removes old and inserts new index entries
+  - Partial updates only touch impacted indexes
+  - Unit tests cover update index maintenance
+
+deppends_on:
+  - 

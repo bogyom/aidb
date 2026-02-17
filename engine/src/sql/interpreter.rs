@@ -1,13 +1,13 @@
 use super::lexer::Literal;
 use super::parser::{
-    BinaryOp, Expr, FunctionArg, OrderBy, OrderDirection, Select, SelectItem, SetExpr,
-    SetOp, UnaryOp,
+    BinaryOp, CastType, Expr, FunctionArg, FunctionModifier, OrderBy, OrderDirection, Select,
+    SelectItem, SelectModifier, SetExpr, SetOp, UnaryOp,
 };
 use super::predicate::{collect_conjuncts, predicate_table_indices, TableRef, TableUsageError};
 use crate::{ColumnMeta, Database, EngineError, QueryResult, SqlType, TableSchema, Value};
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::rc::Rc;
 
 #[derive(Clone, Copy)]
@@ -73,48 +73,67 @@ fn execute_select_inner(
     }
 
     let columns = build_columns(select, &tables)?;
-    let has_aggregate = select
-        .items
-        .iter()
-        .any(|item| matches!(item, SelectItem::Expr(expr) if expr_is_aggregate(expr)));
+    let aggregate_exprs = gather_aggregate_exprs(select);
+    let needs_grouping =
+        !select.group_by.is_empty() || select.having.is_some() || !aggregate_exprs.is_empty();
 
     if tables.is_empty() {
         let context = EvalContext {
             db,
             current: Vec::new(),
-            outer,
+            outer: outer.clone(),
             subquery_cache: subquery_cache.clone(),
             correlation_probe: correlation_probe.clone(),
         };
 
-        if has_aggregate {
-            let mut aggregates = Vec::new();
-            for item in &select.items {
-                match item {
-                    SelectItem::Expr(expr) if expr_is_aggregate(expr) => {
-                        aggregates.push(AggregateState::new(expr)?);
-                    }
-                    _ => return Err(EngineError::InvalidSql),
-                }
-            }
-
+        if needs_grouping {
             let should_consume = match select.filter.as_ref() {
                 Some(filter) => eval_predicate(filter, &context)?,
                 None => true,
             };
-            if should_consume {
-                for state in aggregates.iter_mut() {
-                    state.consume(expr_arg_for_aggregate(state.expr(), &context)?);
+            let mut groups: HashMap<Vec<GroupKeyValue>, GroupState> = HashMap::new();
+
+            if select.group_by.is_empty() {
+                if should_consume || !aggregate_exprs.is_empty() {
+                    let mut group = GroupState {
+                        aggregates: build_aggregate_states(&aggregate_exprs)?,
+                        sample_rows: Vec::new(),
+                    };
+                    if should_consume {
+                        for state in group.aggregates.iter_mut() {
+                            state.consume(expr_arg_for_aggregate(state.expr(), &context)?)?;
+                        }
+                    }
+                    groups.insert(Vec::new(), group);
                 }
+            } else if should_consume {
+                let mut key = Vec::with_capacity(select.group_by.len());
+                for expr in &select.group_by {
+                    let value = eval_expr(expr, &context)?;
+                    key.push(group_key_value(&value));
+                }
+                let mut group = GroupState {
+                    aggregates: build_aggregate_states(&aggregate_exprs)?,
+                    sample_rows: Vec::new(),
+                };
+                for state in group.aggregates.iter_mut() {
+                    state.consume(expr_arg_for_aggregate(state.expr(), &context)?)?;
+                }
+                groups.insert(key, group);
             }
 
-            return Ok(QueryResult {
-                columns,
-                rows: vec![aggregates
-                    .into_iter()
-                    .map(|state| state.finish())
-                    .collect()],
-            });
+            let rows = collect_grouped_rows(
+                select,
+                &tables,
+                &groups,
+                db,
+                &outer,
+                &subquery_cache,
+                &correlation_probe,
+                &aggregate_exprs,
+                matches!(select.modifier, SelectModifier::Distinct),
+            )?;
+            return Ok(QueryResult { columns, rows });
         }
 
         if let Some(filter) = select.filter.as_ref() {
@@ -161,19 +180,48 @@ fn execute_select_inner(
     let (join_predicates, remaining_filter) =
         split_join_predicates(remaining_filter.as_ref(), &table_refs)?;
 
-    if has_aggregate {
-        let mut context = EvalContext {
+    if needs_grouping {
+        let join_order = join_order_for_query(&tables, &join_predicates);
+        let mut selected: Vec<Option<&[Value]>> = vec![None; tables.len()];
+        let mut groups: HashMap<Vec<GroupKeyValue>, GroupState> = HashMap::new();
+        group_join_incremental(
+            &tables,
+            &join_order,
+            0,
+            &mut selected,
             db,
-            current: Vec::new(),
-            outer,
-            subquery_cache: subquery_cache.clone(),
-            correlation_probe: correlation_probe.clone(),
-        };
-        let aggregated = evaluate_aggregates(remaining_filter.as_ref(), select, &tables, &mut context)?;
-        return Ok(QueryResult {
-            columns,
-            rows: vec![aggregated],
-        });
+            &outer,
+            &subquery_cache,
+            &correlation_probe,
+            &join_predicates,
+            &remaining_filter,
+            &select.group_by,
+            &aggregate_exprs,
+            &mut groups,
+        )?;
+
+        if groups.is_empty() && select.group_by.is_empty() && !aggregate_exprs.is_empty() {
+            groups.insert(
+                Vec::new(),
+                GroupState {
+                    aggregates: build_aggregate_states(&aggregate_exprs)?,
+                    sample_rows: Vec::new(),
+                },
+            );
+        }
+
+        let rows = collect_grouped_rows(
+            select,
+            &tables,
+            &groups,
+            db,
+            &outer,
+            &subquery_cache,
+            &correlation_probe,
+            &aggregate_exprs,
+            matches!(select.modifier, SelectModifier::Distinct),
+        )?;
+        return Ok(QueryResult { columns, rows });
     }
 
     let mut collected: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
@@ -193,6 +241,10 @@ fn execute_select_inner(
         select,
         &mut collected,
     )?;
+
+    if matches!(select.modifier, SelectModifier::Distinct) {
+        dedupe_collected_rows(&mut collected);
+    }
 
     if !select.order_by.is_empty() {
         collected.sort_by(|(left_keys, _), (right_keys, _)| {
@@ -355,11 +407,10 @@ fn execute_exists(
         return Ok(false);
     }
 
-    let has_aggregate = select
-        .items
-        .iter()
-        .any(|item| matches!(item, SelectItem::Expr(expr) if expr_is_aggregate(expr)));
-    if has_aggregate {
+    let needs_grouping = !select.group_by.is_empty()
+        || select.having.is_some()
+        || !gather_aggregate_exprs(select).is_empty();
+    if needs_grouping {
         let result = execute_select_inner(
             select,
             context.db,
@@ -511,7 +562,7 @@ fn evaluate_aggregates(
         &mut aggregates,
     )?;
 
-    Ok(aggregates.into_iter().map(|state| state.finish()).collect())
+    Ok(aggregates.into_iter().map(|state| state.result()).collect())
 }
 
 fn combine_conjuncts(conjuncts: Vec<Expr>) -> Option<Expr> {
@@ -864,7 +915,7 @@ fn aggregate_join_incremental<'a>(
         }
 
         for state in aggregates.iter_mut() {
-            state.consume(expr_arg_for_aggregate(state.expr(), &row_context)?);
+            state.consume(expr_arg_for_aggregate(state.expr(), &row_context)?)?;
         }
         return Ok(());
     }
@@ -900,6 +951,216 @@ fn aggregate_join_incremental<'a>(
     }
     selected[table_idx] = None;
     Ok(())
+}
+
+fn group_join_incremental<'a>(
+    tables: &'a [TableContext<'a>],
+    order: &[usize],
+    level: usize,
+    selected: &mut Vec<Option<&'a [Value]>>,
+    db: &'a Database,
+    outer: &[RowContext<'a>],
+    subquery_cache: &Rc<RefCell<HashMap<usize, Value>>>,
+    correlation_probe: &Option<Rc<RefCell<bool>>>,
+    join_predicates: &[JoinPredicate],
+    filter: &Option<Expr>,
+    group_by: &[Expr],
+    aggregate_exprs: &[Expr],
+    groups: &mut HashMap<Vec<GroupKeyValue>, GroupState>,
+) -> Result<(), EngineError> {
+    if tables.is_empty() {
+        return Ok(());
+    }
+    if level == order.len() {
+        let (current, _combined) = build_row_contexts(tables, selected);
+        let row_context = EvalContext {
+            db,
+            current,
+            outer: outer.to_vec(),
+            subquery_cache: subquery_cache.clone(),
+            correlation_probe: correlation_probe.clone(),
+        };
+
+        if let Some(filter) = filter {
+            if !eval_predicate(filter, &row_context)? {
+                return Ok(());
+            }
+        }
+
+        let mut key = Vec::with_capacity(group_by.len());
+        for expr in group_by {
+            let value = eval_expr(expr, &row_context)?;
+            key.push(group_key_value(&value));
+        }
+
+        let group = match groups.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let aggregates = build_aggregate_states(aggregate_exprs)?;
+                let sample_rows = selected
+                    .iter()
+                    .map(|row| row.expect("row selected").to_vec())
+                    .collect();
+                entry.insert(GroupState {
+                    aggregates,
+                    sample_rows,
+                })
+            }
+        };
+
+        for state in group.aggregates.iter_mut() {
+            state.consume(expr_arg_for_aggregate(state.expr(), &row_context)?)?;
+        }
+        return Ok(());
+    }
+
+    let table_idx = order[level];
+    for row in &tables[table_idx].rows {
+        selected[table_idx] = Some(row.as_slice());
+        if !eval_join_predicates(
+            tables,
+            selected,
+            outer,
+            db,
+            subquery_cache,
+            correlation_probe,
+            join_predicates,
+            table_idx,
+        )? {
+            continue;
+        }
+        group_join_incremental(
+            tables,
+            order,
+            level + 1,
+            selected,
+            db,
+            outer,
+            subquery_cache,
+            correlation_probe,
+            join_predicates,
+            filter,
+            group_by,
+            aggregate_exprs,
+            groups,
+        )?;
+    }
+    selected[table_idx] = None;
+    Ok(())
+}
+
+fn collect_grouped_rows(
+    select: &Select,
+    tables: &[TableContext<'_>],
+    groups: &HashMap<Vec<GroupKeyValue>, GroupState>,
+    db: &Database,
+    outer: &[RowContext<'_>],
+    subquery_cache: &Rc<RefCell<HashMap<usize, Value>>>,
+    correlation_probe: &Option<Rc<RefCell<bool>>>,
+    aggregate_exprs: &[Expr],
+    distinct: bool,
+) -> Result<Vec<Vec<Value>>, EngineError> {
+    let mut collected: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
+    for group in groups.values() {
+        let mut current = Vec::new();
+        for (idx, table) in tables.iter().enumerate() {
+            if let Some(row) = group.sample_rows.get(idx) {
+                current.push(RowContext {
+                    table: table.table,
+                    alias: table.alias,
+                    row,
+                });
+            }
+        }
+
+        let context = EvalContext {
+            db,
+            current,
+            outer: outer.to_vec(),
+            subquery_cache: subquery_cache.clone(),
+            correlation_probe: correlation_probe.clone(),
+        };
+
+        let mut aggregate_values = Vec::with_capacity(aggregate_exprs.len());
+        for (expr, state) in aggregate_exprs.iter().zip(group.aggregates.iter()) {
+            aggregate_values.push((expr.clone(), state.result()));
+        }
+
+        if let Some(having) = select.having.as_ref() {
+            if !eval_predicate_group(having, &context, &aggregate_values)? {
+                continue;
+            }
+        }
+
+        let mut output_row = Vec::with_capacity(select.items.len());
+        let mut combined = Vec::new();
+        for row in &group.sample_rows {
+            combined.extend_from_slice(row);
+        }
+        for item in &select.items {
+            match item {
+                SelectItem::Wildcard(prefix) => {
+                    if tables.is_empty() {
+                        return Err(EngineError::InvalidSql);
+                    }
+                    if let Some(prefix) = prefix {
+                        let mut matched = false;
+                        for row_ctx in &context.current {
+                            if matches_table(prefix, *row_ctx) {
+                                output_row.extend_from_slice(row_ctx.row);
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if !matched {
+                            return Err(EngineError::InvalidSql);
+                        }
+                    } else {
+                        output_row.extend_from_slice(&combined);
+                    }
+                }
+                SelectItem::Expr(expr) => {
+                    output_row.push(eval_expr_group(expr, &context, &aggregate_values)?);
+                }
+            }
+        }
+
+        let mut order_keys = Vec::with_capacity(select.order_by.len());
+        for order in &select.order_by {
+            let key = order_key_group(order, &output_row, &context, &aggregate_values)?;
+            order_keys.push(key);
+        }
+        collected.push((order_keys, output_row));
+    }
+
+    if distinct {
+        dedupe_collected_rows(&mut collected);
+    }
+
+    if !select.order_by.is_empty() {
+        collected.sort_by(|(left_keys, _), (right_keys, _)| {
+            for (idx, order) in select.order_by.iter().enumerate() {
+                let ordering = value_cmp(
+                    left_keys.get(idx).unwrap_or(&Value::Null),
+                    right_keys.get(idx).unwrap_or(&Value::Null),
+                );
+                if ordering != Ordering::Equal {
+                    return if matches!(order.direction, OrderDirection::Desc) {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    };
+                }
+            }
+            Ordering::Equal
+        });
+    }
+
+    let mut rows: Vec<Vec<Value>> = collected.into_iter().map(|(_, row)| row).collect();
+    if let Some(limit) = select.limit {
+        rows.truncate(limit as usize);
+    }
+    Ok(rows)
 }
 
 fn eval_join_predicates<'a>(
@@ -1002,30 +1263,84 @@ fn resolve_column_type(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum GroupKeyValue {
+    Null,
+    Integer(i64),
+    Real(u64),
+    Text(String),
+    Boolean(bool),
+}
+
+fn group_key_value(value: &Value) -> GroupKeyValue {
+    match value {
+        Value::Null => GroupKeyValue::Null,
+        Value::Integer(value) => GroupKeyValue::Integer(*value),
+        Value::Real(value) => GroupKeyValue::Real(value.to_bits()),
+        Value::Text(value) => GroupKeyValue::Text(value.clone()),
+        Value::Boolean(value) => GroupKeyValue::Boolean(*value),
+    }
+}
+
 struct AggregateState {
     expr: Expr,
     kind: AggregateKind,
+    distinct: bool,
+    seen: HashSet<GroupKeyValue>,
 }
 
 enum AggregateKind {
     Count { count: i64 },
     Avg { sum: f64, count: i64 },
+    Sum { value: Option<Value> },
+    Min { value: Option<Value> },
+    Max { value: Option<Value> },
 }
 
 impl AggregateState {
     fn new(expr: &Expr) -> Result<Self, EngineError> {
         match expr {
-            Expr::Function { name, args: _ } => {
+            Expr::Function {
+                name,
+                modifier,
+                args: _,
+            } => {
                 let name = name.to_ascii_lowercase();
+                let distinct = matches!(modifier, FunctionModifier::Distinct);
                 if name == "count" {
                     Ok(Self {
                         expr: expr.clone(),
                         kind: AggregateKind::Count { count: 0 },
+                        distinct,
+                        seen: HashSet::new(),
                     })
                 } else if name == "avg" {
                     Ok(Self {
                         expr: expr.clone(),
                         kind: AggregateKind::Avg { sum: 0.0, count: 0 },
+                        distinct,
+                        seen: HashSet::new(),
+                    })
+                } else if name == "sum" {
+                    Ok(Self {
+                        expr: expr.clone(),
+                        kind: AggregateKind::Sum { value: None },
+                        distinct,
+                        seen: HashSet::new(),
+                    })
+                } else if name == "min" {
+                    Ok(Self {
+                        expr: expr.clone(),
+                        kind: AggregateKind::Min { value: None },
+                        distinct,
+                        seen: HashSet::new(),
+                    })
+                } else if name == "max" {
+                    Ok(Self {
+                        expr: expr.clone(),
+                        kind: AggregateKind::Max { value: None },
+                        distinct,
+                        seen: HashSet::new(),
                     })
                 } else {
                     Err(EngineError::InvalidSql)
@@ -1039,7 +1354,16 @@ impl AggregateState {
         &self.expr
     }
 
-    fn consume(&mut self, value: Option<Value>) {
+    fn consume(&mut self, value: Option<Value>) -> Result<(), EngineError> {
+        if self.distinct {
+            if let Some(ref value) = value {
+                let key = group_key_value(value);
+                if self.seen.contains(&key) {
+                    return Ok(());
+                }
+                self.seen.insert(key);
+            }
+        }
         match &mut self.kind {
             AggregateKind::Count { count } => {
                 if value.is_some() {
@@ -1047,26 +1371,76 @@ impl AggregateState {
                 }
             }
             AggregateKind::Avg { sum, count } => {
-                if let Some(value) = value.and_then(value_to_f64) {
-                    *sum += value;
+                if let Some(value) = value {
+                    let numeric = value_to_f64(value).ok_or(EngineError::InvalidSql)?;
+                    *sum += numeric;
                     *count += 1;
                 }
             }
-        }
-    }
-
-    fn finish(self) -> Value {
-        match self.kind {
-            AggregateKind::Count { count } => Value::Integer(count),
-            AggregateKind::Avg { sum, count } => {
-                if count == 0 {
-                    Value::Null
-                } else {
-                    Value::Real(sum / count as f64)
+            AggregateKind::Sum { value: total } => {
+                if let Some(value) = value {
+                    *total = match total.take() {
+                        Some(existing) => Some(numeric_add(existing, value)?),
+                        None => Some(value),
+                    };
+                }
+            }
+            AggregateKind::Min { value: current } => {
+                if let Some(value) = value {
+                    let replace = match current.as_ref() {
+                        None => true,
+                        Some(existing) => value_cmp(&value, existing) == Ordering::Less,
+                    };
+                    if replace {
+                        *current = Some(value);
+                    }
+                }
+            }
+            AggregateKind::Max { value: current } => {
+                if let Some(value) = value {
+                    let replace = match current.as_ref() {
+                        None => true,
+                        Some(existing) => value_cmp(&value, existing) == Ordering::Greater,
+                    };
+                    if replace {
+                        *current = Some(value);
+                    }
                 }
             }
         }
+        Ok(())
     }
+
+    fn result(&self) -> Value {
+        match &self.kind {
+            AggregateKind::Count { count } => Value::Integer(*count),
+            AggregateKind::Avg { sum, count } => {
+                if *count == 0 {
+                    Value::Null
+                } else {
+                    Value::Real(*sum / *count as f64)
+                }
+            }
+            AggregateKind::Sum { value } => value.clone().unwrap_or(Value::Null),
+            AggregateKind::Min { value } => value.clone().unwrap_or(Value::Null),
+            AggregateKind::Max { value } => value.clone().unwrap_or(Value::Null),
+        }
+    }
+}
+
+struct GroupState {
+    aggregates: Vec<AggregateState>,
+    sample_rows: Vec<Vec<Value>>,
+}
+
+fn build_aggregate_states(
+    aggregate_exprs: &[Expr],
+) -> Result<Vec<AggregateState>, EngineError> {
+    let mut aggregates = Vec::with_capacity(aggregate_exprs.len());
+    for expr in aggregate_exprs {
+        aggregates.push(AggregateState::new(expr)?);
+    }
+    Ok(aggregates)
 }
 
 fn expr_arg_for_aggregate(
@@ -1074,14 +1448,24 @@ fn expr_arg_for_aggregate(
     context: &EvalContext<'_>,
 ) -> Result<Option<Value>, EngineError> {
     match expr {
-        Expr::Function { name, args } => {
+        Expr::Function {
+            name,
+            modifier,
+            args,
+        } => {
             let name = name.to_ascii_lowercase();
             if name == "count" {
                 if args.is_empty() {
                     return Ok(None);
                 }
                 match &args[0] {
-                    FunctionArg::Star => Ok(Some(Value::Integer(1))),
+                    FunctionArg::Star => {
+                        if matches!(modifier, FunctionModifier::Distinct) {
+                            Err(EngineError::InvalidSql)
+                        } else {
+                            Ok(Some(Value::Integer(1)))
+                        }
+                    }
                     FunctionArg::Expr(expr) => {
                         let value = eval_expr(expr, context)?;
                         Ok(if matches!(value, Value::Null) {
@@ -1091,7 +1475,7 @@ fn expr_arg_for_aggregate(
                         })
                     }
                 }
-            } else if name == "avg" {
+            } else if name == "avg" || name == "sum" || name == "min" || name == "max" {
                 if args.len() != 1 {
                     return Err(EngineError::InvalidSql);
                 }
@@ -1118,9 +1502,82 @@ fn expr_is_aggregate(expr: &Expr) -> bool {
     match expr {
         Expr::Function { name, .. } => {
             let name = name.to_ascii_lowercase();
-            name == "count" || name == "avg"
+            name == "count" || name == "avg" || name == "sum" || name == "min" || name == "max"
         }
         _ => false,
+    }
+}
+
+fn gather_aggregate_exprs(select: &Select) -> Vec<Expr> {
+    let mut aggregates = Vec::new();
+    for item in &select.items {
+        if let SelectItem::Expr(expr) = item {
+            collect_aggregate_exprs_from_expr(expr, &mut aggregates);
+        }
+    }
+    if let Some(having) = select.having.as_ref() {
+        collect_aggregate_exprs_from_expr(having, &mut aggregates);
+    }
+    for order in &select.order_by {
+        collect_aggregate_exprs_from_expr(&order.expr, &mut aggregates);
+    }
+    aggregates
+}
+
+fn collect_aggregate_exprs_from_expr(expr: &Expr, aggregates: &mut Vec<Expr>) {
+    if expr_is_aggregate(expr) {
+        if !aggregates.contains(expr) {
+            aggregates.push(expr.clone());
+        }
+        return;
+    }
+
+    match expr {
+        Expr::Unary { expr, .. } => collect_aggregate_exprs_from_expr(expr, aggregates),
+        Expr::Cast { expr, .. } => collect_aggregate_exprs_from_expr(expr, aggregates),
+        Expr::Binary { left, right, .. } => {
+            collect_aggregate_exprs_from_expr(left, aggregates);
+            collect_aggregate_exprs_from_expr(right, aggregates);
+        }
+        Expr::Between { expr, low, high, .. } => {
+            collect_aggregate_exprs_from_expr(expr, aggregates);
+            collect_aggregate_exprs_from_expr(low, aggregates);
+            collect_aggregate_exprs_from_expr(high, aggregates);
+        }
+        Expr::InList { expr, list, .. } => {
+            collect_aggregate_exprs_from_expr(expr, aggregates);
+            for item in list {
+                collect_aggregate_exprs_from_expr(item, aggregates);
+            }
+        }
+        Expr::Case {
+            operand,
+            when_thens,
+            else_expr,
+        } => {
+            if let Some(operand) = operand.as_ref() {
+                collect_aggregate_exprs_from_expr(operand, aggregates);
+            }
+            for (when_expr, then_expr) in when_thens {
+                collect_aggregate_exprs_from_expr(when_expr, aggregates);
+                collect_aggregate_exprs_from_expr(then_expr, aggregates);
+            }
+            if let Some(else_expr) = else_expr.as_ref() {
+                collect_aggregate_exprs_from_expr(else_expr, aggregates);
+            }
+        }
+        Expr::IsNull { expr, .. } => collect_aggregate_exprs_from_expr(expr, aggregates),
+        Expr::Function { args, .. } => {
+            for arg in args {
+                if let FunctionArg::Expr(arg_expr) = arg {
+                    collect_aggregate_exprs_from_expr(arg_expr, aggregates);
+                }
+            }
+        }
+        Expr::Identifier(_)
+        | Expr::Literal(_)
+        | Expr::Subquery(_)
+        | Expr::Exists(_) => {}
     }
 }
 
@@ -1145,7 +1602,12 @@ fn eval_expr(expr: &Expr, context: &EvalContext<'_>) -> Result<Value, EngineErro
                     _ => Err(EngineError::InvalidSql),
                 },
                 UnaryOp::Neg => numeric_negate(value),
+                UnaryOp::Pos => numeric_positive(value),
             }
+        }
+        Expr::Cast { expr, ty } => {
+            let value = eval_expr(expr, context)?;
+            cast_numeric(value, *ty)
         }
         Expr::Binary { left, op, right } => {
             let left = eval_expr(left, context)?;
@@ -1231,7 +1693,14 @@ fn eval_expr(expr: &Expr, context: &EvalContext<'_>) -> Result<Value, EngineErro
                 Ok(Value::Null)
             }
         }
-        Expr::Function { name, args } => {
+        Expr::Function {
+            name,
+            modifier,
+            args,
+        } => {
+            if matches!(modifier, FunctionModifier::Distinct) {
+                return Err(EngineError::InvalidSql);
+            }
             let name = name.to_ascii_lowercase();
             if name == "abs" {
                 if args.len() != 1 {
@@ -1256,6 +1725,29 @@ fn eval_expr(expr: &Expr, context: &EvalContext<'_>) -> Result<Value, EngineErro
                     }
                 }
                 Ok(Value::Null)
+            } else if name == "nullif" {
+                if args.len() != 2 {
+                    return Err(EngineError::InvalidSql);
+                }
+                let first = match &args[0] {
+                    FunctionArg::Expr(expr) => eval_expr(expr, context)?,
+                    FunctionArg::Star => return Err(EngineError::InvalidSql),
+                };
+                if matches!(first, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                let second = match &args[1] {
+                    FunctionArg::Expr(expr) => eval_expr(expr, context)?,
+                    FunctionArg::Star => return Err(EngineError::InvalidSql),
+                };
+                if matches!(second, Value::Null) {
+                    return Ok(first);
+                }
+                if values_equal(&first, &second) {
+                    Ok(Value::Null)
+                } else {
+                    Ok(first)
+                }
             } else if expr_is_aggregate(expr) {
                 Err(EngineError::InvalidSql)
             } else {
@@ -1285,6 +1777,222 @@ fn eval_expr(expr: &Expr, context: &EvalContext<'_>) -> Result<Value, EngineErro
         Expr::Exists(select) => {
             Ok(Value::Boolean(execute_exists(select, context)?))
         }
+    }
+}
+
+fn aggregate_value(expr: &Expr, aggregates: &[(Expr, Value)]) -> Option<Value> {
+    aggregates
+        .iter()
+        .find(|(aggregate_expr, _)| aggregate_expr == expr)
+        .map(|(_, value)| value.clone())
+}
+
+fn eval_predicate_group(
+    expr: &Expr,
+    context: &EvalContext<'_>,
+    aggregates: &[(Expr, Value)],
+) -> Result<bool, EngineError> {
+    match eval_expr_group(expr, context, aggregates)? {
+        Value::Boolean(value) => Ok(value),
+        Value::Null => Ok(false),
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
+fn eval_expr_group(
+    expr: &Expr,
+    context: &EvalContext<'_>,
+    aggregates: &[(Expr, Value)],
+) -> Result<Value, EngineError> {
+    match expr {
+        Expr::Identifier(parts) => resolve_identifier(parts, context),
+        Expr::Literal(literal) => literal_to_value(literal),
+        Expr::Unary { op, expr } => {
+            let value = eval_expr_group(expr, context, aggregates)?;
+            match op {
+                UnaryOp::Not => match value {
+                    Value::Boolean(value) => Ok(Value::Boolean(!value)),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(EngineError::InvalidSql),
+                },
+                UnaryOp::Neg => numeric_negate(value),
+                UnaryOp::Pos => numeric_positive(value),
+            }
+        }
+        Expr::Cast { expr, ty } => {
+            let value = eval_expr_group(expr, context, aggregates)?;
+            cast_numeric(value, *ty)
+        }
+        Expr::Binary { left, op, right } => {
+            let left = eval_expr_group(left, context, aggregates)?;
+            let right = eval_expr_group(right, context, aggregates)?;
+            eval_binary(op, left, right)
+        }
+        Expr::IsNull { expr, negated } => {
+            let value = eval_expr_group(expr, context, aggregates)?;
+            let is_null = matches!(value, Value::Null);
+            Ok(Value::Boolean(if *negated { !is_null } else { is_null }))
+        }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => {
+            let value = eval_expr_group(expr, context, aggregates)?;
+            let low = eval_expr_group(low, context, aggregates)?;
+            let high = eval_expr_group(high, context, aggregates)?;
+            if matches!(value, Value::Null)
+                || matches!(low, Value::Null)
+                || matches!(high, Value::Null)
+            {
+                return Ok(Value::Null);
+            }
+            let between = value_cmp(&value, &low) != Ordering::Less
+                && value_cmp(&value, &high) != Ordering::Greater;
+            Ok(Value::Boolean(if *negated { !between } else { between }))
+        }
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let value = eval_expr_group(expr, context, aggregates)?;
+            if matches!(value, Value::Null) {
+                return Ok(Value::Null);
+            }
+            let mut has_null = false;
+            for item in list {
+                let item_value = eval_expr_group(item, context, aggregates)?;
+                if matches!(item_value, Value::Null) {
+                    has_null = true;
+                    continue;
+                }
+                if values_equal(&value, &item_value) {
+                    return Ok(Value::Boolean(!*negated));
+                }
+            }
+            if has_null {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::Boolean(*negated))
+            }
+        }
+        Expr::Case {
+            operand,
+            when_thens,
+            else_expr,
+        } => {
+            if let Some(operand) = operand {
+                let base = eval_expr_group(operand, context, aggregates)?;
+                for (when_expr, then_expr) in when_thens {
+                    let when_value = eval_expr_group(when_expr, context, aggregates)?;
+                    if values_equal(&base, &when_value) {
+                        return eval_expr_group(then_expr, context, aggregates);
+                    }
+                }
+            } else {
+                for (when_expr, then_expr) in when_thens {
+                    let condition = eval_expr_group(when_expr, context, aggregates)?;
+                    let is_true = match condition {
+                        Value::Boolean(value) => value,
+                        Value::Null => false,
+                        _ => return Err(EngineError::InvalidSql),
+                    };
+                    if is_true {
+                        return eval_expr_group(then_expr, context, aggregates);
+                    }
+                }
+            }
+            if let Some(else_expr) = else_expr {
+                eval_expr_group(else_expr, context, aggregates)
+            } else {
+                Ok(Value::Null)
+            }
+        }
+        Expr::Function {
+            name,
+            modifier,
+            args,
+        } => {
+            if expr_is_aggregate(expr) {
+                return aggregate_value(expr, aggregates).ok_or(EngineError::InvalidSql);
+            }
+            if matches!(modifier, FunctionModifier::Distinct) {
+                return Err(EngineError::InvalidSql);
+            }
+            let name = name.to_ascii_lowercase();
+            if name == "abs" {
+                if args.len() != 1 {
+                    return Err(EngineError::InvalidSql);
+                }
+                match &args[0] {
+                    FunctionArg::Expr(expr) => {
+                        let value = eval_expr_group(expr, context, aggregates)?;
+                        numeric_abs(value)
+                    }
+                    FunctionArg::Star => Err(EngineError::InvalidSql),
+                }
+            } else if name == "coalesce" {
+                for arg in args {
+                    if let FunctionArg::Expr(expr) = arg {
+                        let value = eval_expr_group(expr, context, aggregates)?;
+                        if !matches!(value, Value::Null) {
+                            return Ok(value);
+                        }
+                    } else {
+                        return Err(EngineError::InvalidSql);
+                    }
+                }
+                Ok(Value::Null)
+            } else if name == "nullif" {
+                if args.len() != 2 {
+                    return Err(EngineError::InvalidSql);
+                }
+                let first = match &args[0] {
+                    FunctionArg::Expr(expr) => eval_expr_group(expr, context, aggregates)?,
+                    FunctionArg::Star => return Err(EngineError::InvalidSql),
+                };
+                if matches!(first, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                let second = match &args[1] {
+                    FunctionArg::Expr(expr) => eval_expr_group(expr, context, aggregates)?,
+                    FunctionArg::Star => return Err(EngineError::InvalidSql),
+                };
+                if matches!(second, Value::Null) {
+                    return Ok(first);
+                }
+                if values_equal(&first, &second) {
+                    Ok(Value::Null)
+                } else {
+                    Ok(first)
+                }
+            } else {
+                Err(EngineError::InvalidSql)
+            }
+        }
+        Expr::Subquery(select) => {
+            let key = select.as_ref() as *const Select as usize;
+            if let Some(value) = context.subquery_cache.borrow().get(&key) {
+                return Ok(value.clone());
+            }
+
+            let probe = Rc::new(RefCell::new(false));
+            let result = execute_select_inner(
+                select,
+                context.db,
+                context.current.clone(),
+                context.subquery_cache.clone(),
+                Some(probe.clone()),
+            )?;
+            let value = scalar_from_query(result)?;
+            if !*probe.borrow() {
+                context.subquery_cache.borrow_mut().insert(key, value.clone());
+            }
+            Ok(value)
+        }
+        Expr::Exists(select) => Ok(Value::Boolean(execute_exists(select, context)?)),
     }
 }
 
@@ -1411,6 +2119,7 @@ fn eval_binary(op: &BinaryOp, left: Value, right: Value) -> Result<Value, Engine
         BinaryOp::Sub => numeric_sub(left, right),
         BinaryOp::Mul => numeric_mul(left, right),
         BinaryOp::Div => numeric_div(left, right),
+        BinaryOp::DivInt => numeric_div_int(left, right),
     }
 }
 
@@ -1502,6 +2211,40 @@ fn numeric_negate(value: Value) -> Result<Value, EngineError> {
     }
 }
 
+fn numeric_positive(value: Value) -> Result<Value, EngineError> {
+    match value {
+        Value::Integer(value) => Ok(Value::Integer(value)),
+        Value::Real(value) => Ok(Value::Real(value)),
+        Value::Null => Ok(Value::Null),
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
+fn cast_numeric(value: Value, ty: CastType) -> Result<Value, EngineError> {
+    match ty {
+        CastType::Signed | CastType::Integer => cast_to_integer(value),
+        CastType::Decimal | CastType::Real => cast_to_real(value),
+    }
+}
+
+fn cast_to_integer(value: Value) -> Result<Value, EngineError> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Integer(value) => Ok(Value::Integer(value)),
+        Value::Real(value) => Ok(Value::Integer(value.trunc() as i64)),
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
+fn cast_to_real(value: Value) -> Result<Value, EngineError> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Integer(value) => Ok(Value::Real(value as f64)),
+        Value::Real(value) => Ok(Value::Real(value)),
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
 fn numeric_abs(value: Value) -> Result<Value, EngineError> {
     match value {
         Value::Integer(value) => Ok(Value::Integer(value.abs())),
@@ -1558,6 +2301,39 @@ fn numeric_div(left: Value, right: Value) -> Result<Value, EngineError> {
     }
 }
 
+fn numeric_div_int(left: Value, right: Value) -> Result<Value, EngineError> {
+    match (left, right) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+        (Value::Integer(a), Value::Integer(b)) => {
+            if b == 0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Integer(a / b))
+        }
+        (Value::Integer(a), Value::Real(b)) => {
+            let b_int = b.trunc() as i64;
+            if b_int == 0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Integer(a / b_int))
+        }
+        (Value::Real(a), Value::Integer(b)) => {
+            if b == 0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Integer(a.trunc() as i64 / b))
+        }
+        (Value::Real(a), Value::Real(b)) => {
+            let b_int = b.trunc() as i64;
+            if b_int == 0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Integer(a.trunc() as i64 / b_int))
+        }
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
 fn numeric_op<F>(left: Value, right: Value, op: F) -> Result<Value, EngineError>
 where
     F: FnOnce(f64, f64) -> f64,
@@ -1592,9 +2368,14 @@ fn expr_result_type(expr: &Expr, tables: &[TableContext<'_>]) -> Result<SqlType,
             Literal::Boolean(_) => Ok(SqlType::Boolean),
             Literal::Null => Ok(SqlType::Text),
         },
+        Expr::Cast { ty, .. } => match ty {
+            CastType::Signed | CastType::Integer => Ok(SqlType::Integer),
+            CastType::Decimal | CastType::Real => Ok(SqlType::Real),
+        },
         Expr::Unary { op, expr } => match op {
             UnaryOp::Not => Ok(SqlType::Boolean),
             UnaryOp::Neg => expr_result_type(expr, tables),
+            UnaryOp::Pos => expr_result_type(expr, tables),
         },
         Expr::Binary { op, left, right } => match op {
             BinaryOp::And
@@ -1615,6 +2396,7 @@ fn expr_result_type(expr: &Expr, tables: &[TableContext<'_>]) -> Result<SqlType,
                 }
             }
             BinaryOp::Div => Ok(SqlType::Real),
+            BinaryOp::DivInt => Ok(SqlType::Integer),
         },
         Expr::Between { .. } => Ok(SqlType::Boolean),
         Expr::InList { .. } => Ok(SqlType::Boolean),
@@ -1634,6 +2416,37 @@ fn expr_result_type(expr: &Expr, tables: &[TableContext<'_>]) -> Result<SqlType,
                 Ok(SqlType::Integer)
             } else if name == "avg" {
                 Ok(SqlType::Real)
+            } else if name == "sum" {
+                if let Expr::Function { args, .. } = expr {
+                    if args.len() != 1 {
+                        return Err(EngineError::InvalidSql);
+                    }
+                    match &args[0] {
+                        FunctionArg::Expr(expr) => {
+                            let arg_type = expr_result_type(expr, tables)?;
+                            if arg_type == SqlType::Real {
+                                Ok(SqlType::Real)
+                            } else {
+                                Ok(SqlType::Integer)
+                            }
+                        }
+                        FunctionArg::Star => Err(EngineError::InvalidSql),
+                    }
+                } else {
+                    Ok(SqlType::Integer)
+                }
+            } else if name == "min" || name == "max" {
+                if let Expr::Function { args, .. } = expr {
+                    if args.len() != 1 {
+                        return Err(EngineError::InvalidSql);
+                    }
+                    match &args[0] {
+                        FunctionArg::Expr(expr) => expr_result_type(expr, tables),
+                        FunctionArg::Star => Err(EngineError::InvalidSql),
+                    }
+                } else {
+                    Ok(SqlType::Text)
+                }
             } else if name == "abs" {
                 Ok(SqlType::Integer)
             } else {
@@ -1682,6 +2495,22 @@ fn order_key(
     eval_expr(&order.expr, context)
 }
 
+fn order_key_group(
+    order: &OrderBy,
+    output_row: &[Value],
+    context: &EvalContext<'_>,
+    aggregates: &[(Expr, Value)],
+) -> Result<Value, EngineError> {
+    if let Expr::Literal(Literal::Number(value)) = &order.expr {
+        if let Ok(index) = value.parse::<usize>() {
+            if index >= 1 && index <= output_row.len() {
+                return Ok(output_row[index - 1].clone());
+            }
+        }
+    }
+    eval_expr_group(&order.expr, context, aggregates)
+}
+
 fn values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Null, _) | (_, Value::Null) => false,
@@ -1709,6 +2538,20 @@ fn rows_equal_with_nulls(left: &[Value], right: &[Value]) -> bool {
     left.iter()
         .zip(right.iter())
         .all(|(l, r)| value_equal_with_nulls(l, r))
+}
+
+fn dedupe_collected_rows(collected: &mut Vec<(Vec<Value>, Vec<Value>)>) {
+    let mut unique: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
+    for (keys, row) in collected.drain(..) {
+        if unique
+            .iter()
+            .any(|(_, existing)| rows_equal_with_nulls(existing, &row))
+        {
+            continue;
+        }
+        unique.push((keys, row));
+    }
+    *collected = unique;
 }
 
 fn union_distinct_rows(

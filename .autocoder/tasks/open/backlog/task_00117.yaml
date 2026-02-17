@@ -1,0 +1,14 @@
+name: csv-import-api-contract
+
+description: >
+  Define CSV import API contract (endpoint, request format, response schema).
+
+story_points: 2
+
+acceptence_critria:
+  - Endpoint path and method defined
+  - Request format documented
+  - Response schema and error model defined
+
+deppends_on:
+  - 

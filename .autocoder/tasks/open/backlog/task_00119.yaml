@@ -1,0 +1,14 @@
+name: csv-import-cli-command
+
+description: >
+  Add CLI command `aidb import` and flag parsing.
+
+story_points: 3
+
+acceptence_critria:
+  - `aidb import` command available
+  - Flags map to import options
+  - CLI help output includes examples
+
+deppends_on:
+  - 

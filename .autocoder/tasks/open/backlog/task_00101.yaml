@@ -1,0 +1,14 @@
+name: index-catalog-schema
+
+description: >
+  Extend catalog schema to include index metadata in memory.
+
+story_points: 3
+
+acceptence_critria:
+  - Catalog holds index definitions
+  - Index metadata includes name, table, columns, unique flag
+  - Unit tests cover catalog index CRUD
+
+deppends_on:
+  - 

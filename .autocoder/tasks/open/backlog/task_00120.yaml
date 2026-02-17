@@ -1,0 +1,14 @@
+name: csv-import-cli-stream
+
+description: >
+  Implement CLI file streaming to server (no full buffering).
+
+story_points: 3
+
+acceptence_critria:
+  - CLI streams file content over HTTP
+  - Large files do not load fully in memory
+  - Unit test or manual test confirms streaming
+
+deppends_on:
+  - task_00117

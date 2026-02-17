@@ -1,0 +1,14 @@
+name: coalesce-nullif-fns
+
+description: >
+  Implement COALESCE and NULLIF functions in expression evaluation.
+
+story_points: 3
+
+acceptence_critria:
+  - COALESCE and NULLIF parse and evaluate correctly
+  - NULL and non-NULL cases are handled per SQL rules
+  - Unit tests added for COALESCE/NULLIF
+
+deppends_on:
+  - 

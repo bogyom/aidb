@@ -1,0 +1,14 @@
+name: unary-plus-expr
+
+description: >
+  Support unary + in expression parsing and evaluation.
+
+story_points: 2
+
+acceptence_critria:
+  - Unary + parses into expression AST
+  - Unary + evaluates without changing value
+  - Unit tests cover unary + in SELECT and WHERE
+
+deppends_on:
+  - 

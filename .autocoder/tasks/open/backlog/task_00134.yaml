@@ -1,0 +1,15 @@
+name: csv-import-docs
+
+description: >
+  Document import API and CLI usage in README.
+
+story_points: 1
+
+acceptence_critria:
+  - README includes import endpoint usage
+  - CLI import command documented
+  - Examples included
+
+deppends_on:
+  - task_00117
+  - task_00119

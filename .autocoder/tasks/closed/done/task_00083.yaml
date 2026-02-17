@@ -1,0 +1,14 @@
+name: case-expr
+
+description: >
+  Implement CASE expression parsing and evaluation in SELECT/HAVING.
+
+story_points: 4
+
+acceptence_critria:
+  - CASE WHEN/THEN/ELSE parses into AST
+  - CASE evaluates correctly in projection and predicates
+  - Unit tests cover CASE in grouped queries
+
+deppends_on:
+  - 

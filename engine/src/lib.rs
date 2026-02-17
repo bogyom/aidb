@@ -1192,6 +1192,155 @@ mod tests {
     }
 
     #[test]
+    fn execute_select_with_unary_plus() {
+        let path = temp_db_path("execute_select_unary_plus");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO users (id) VALUES (1)")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id) VALUES (2)")
+            .expect("insert row");
+
+        let result = db
+            .execute("SELECT +id FROM users WHERE +id = 1")
+            .expect("select");
+
+        assert_eq!(result.rows, vec![vec![Value::Integer(1)]]);
+    }
+
+    #[test]
+    fn execute_select_with_case_in_projection_and_where() {
+        let path = temp_db_path("execute_select_case_projection_where");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER, name TEXT)")
+            .expect("create table");
+        db.execute("INSERT INTO users (id, name) VALUES (1, 'Ada')")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id, name) VALUES (2, 'Bob')")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT CASE WHEN id = 1 THEN 'Ada' ELSE 'Other' END \
+                 FROM users WHERE CASE WHEN id = 1 THEN TRUE ELSE FALSE END",
+            )
+            .expect("select");
+        assert_eq!(result.rows, vec![vec![Value::Text("Ada".to_string())]]);
+
+        let result = db
+            .execute(
+                "SELECT CASE WHEN id = 1 THEN 'Ada' ELSE 'Other' END \
+                 FROM users ORDER BY id",
+            )
+            .expect("select");
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Text("Ada".to_string())],
+                vec![Value::Text("Other".to_string())],
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_select_with_coalesce_and_nullif() {
+        let path = temp_db_path("execute_select_coalesce_nullif");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER, name TEXT)")
+            .expect("create table");
+        db.execute("INSERT INTO users (id, name) VALUES (1, 'Ada')")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id, name) VALUES (2, NULL)")
+            .expect("insert row");
+
+        let result = db
+            .execute("SELECT COALESCE(name, 'n/a') FROM users ORDER BY id")
+            .expect("select");
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Text("Ada".to_string())],
+                vec![Value::Text("n/a".to_string())],
+            ]
+        );
+
+        let result = db
+            .execute("SELECT NULLIF(id, 1) FROM users ORDER BY id")
+            .expect("select");
+        assert_eq!(
+            result.rows,
+            vec![vec![Value::Null], vec![Value::Integer(2)]]
+        );
+
+        let result = db
+            .execute("SELECT id FROM users WHERE NULLIF(id, 1) IS NULL")
+            .expect("select");
+        assert_eq!(result.rows, vec![vec![Value::Integer(1)]]);
+    }
+
+    #[test]
+    fn execute_select_with_casts() {
+        let path = temp_db_path("execute_select_casts");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE metrics (id INTEGER, score REAL)")
+            .expect("create table");
+        db.execute("INSERT INTO metrics (id, score) VALUES (1, 1.8)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (id, score) VALUES (2, 2.2)")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT CAST(id AS REAL), CAST(score AS SIGNED) \
+                 FROM metrics ORDER BY id",
+            )
+            .expect("select");
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Real(1.0), Value::Integer(1)],
+                vec![Value::Real(2.0), Value::Integer(2)],
+            ]
+        );
+
+        let result = db
+            .execute("SELECT AVG(CAST(id AS DECIMAL)) FROM metrics")
+            .expect("select");
+        assert_eq!(result.rows, vec![vec![Value::Real(1.5)]]);
+    }
+
+    #[test]
+    fn execute_select_with_div_and_slash_filters() {
+        let path = temp_db_path("execute_select_div_slash_filters");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE nums (id INTEGER)")
+            .expect("create table");
+        for id in 1..=4 {
+            db.execute(&format!("INSERT INTO nums (id) VALUES ({id})"))
+                .expect("insert row");
+        }
+
+        let result = db
+            .execute("SELECT id FROM nums WHERE id DIV 2 = 1 ORDER BY id")
+            .expect("select");
+        assert_eq!(
+            result.rows,
+            vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]
+        );
+
+        let result = db
+            .execute("SELECT id FROM nums WHERE id / 2 = 1.5")
+            .expect("select");
+        assert_eq!(result.rows, vec![vec![Value::Integer(3)]]);
+    }
+
+    #[test]
     fn execute_count_star_returns_total_rows() {
         let path = temp_db_path("execute_count_star");
         let mut db =
@@ -1211,6 +1360,404 @@ mod tests {
             vec![ColumnMeta::new("expr", SqlType::Integer)]
         );
         assert_eq!(result.rows, vec![vec![Value::Integer(3)]]);
+    }
+
+    #[test]
+    fn execute_grouped_aggregates_with_nulls() {
+        let path = temp_db_path("execute_grouped_aggregates");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE metrics (g INTEGER, v INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 1)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 2)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, NULL)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, 5)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, NULL)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (3, NULL)")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT g, COUNT(v), COUNT(*), SUM(v), AVG(v), MIN(v), MAX(v) \
+                 FROM metrics GROUP BY g ORDER BY g",
+            )
+            .expect("select");
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    Value::Integer(1),
+                    Value::Integer(2),
+                    Value::Integer(3),
+                    Value::Integer(3),
+                    Value::Real(1.5),
+                    Value::Integer(1),
+                    Value::Integer(2),
+                ],
+                vec![
+                    Value::Integer(2),
+                    Value::Integer(1),
+                    Value::Integer(2),
+                    Value::Integer(5),
+                    Value::Real(5.0),
+                    Value::Integer(5),
+                    Value::Integer(5),
+                ],
+                vec![
+                    Value::Integer(3),
+                    Value::Integer(0),
+                    Value::Integer(1),
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_distinct_aggregates() {
+        let path = temp_db_path("execute_distinct_aggregates");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE metrics (g INTEGER, v INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 1)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 1)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 3)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, NULL)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, 2)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, 2)")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT g, COUNT(ALL v), COUNT(DISTINCT v), \
+                 SUM(ALL v), SUM(DISTINCT v), \
+                 AVG(ALL v), AVG(DISTINCT v) \
+                 FROM metrics GROUP BY g ORDER BY g",
+            )
+            .expect("select");
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    Value::Integer(1),
+                    Value::Integer(3),
+                    Value::Integer(2),
+                    Value::Integer(5),
+                    Value::Integer(4),
+                    Value::Real(5.0 / 3.0),
+                    Value::Real(2.0),
+                ],
+                vec![
+                    Value::Integer(2),
+                    Value::Integer(2),
+                    Value::Integer(1),
+                    Value::Integer(4),
+                    Value::Integer(2),
+                    Value::Real(2.0),
+                    Value::Real(2.0),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_count_all_and_star() {
+        let path = temp_db_path("execute_count_all_and_star");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE metrics (g INTEGER, v INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 1)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, NULL)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, 5)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, 6)")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT g, COUNT(*), COUNT(ALL v) \
+                 FROM metrics GROUP BY g ORDER BY g",
+            )
+            .expect("select");
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(1), Value::Integer(2), Value::Integer(1)],
+                vec![Value::Integer(2), Value::Integer(2), Value::Integer(2)],
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_group_by_multiple_keys() {
+        let path = temp_db_path("execute_group_by_multiple_keys");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE events (a INTEGER, b INTEGER, v INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO events (a, b, v) VALUES (1, 1, 2)")
+            .expect("insert row");
+        db.execute("INSERT INTO events (a, b, v) VALUES (1, 1, 3)")
+            .expect("insert row");
+        db.execute("INSERT INTO events (a, b, v) VALUES (1, 2, 4)")
+            .expect("insert row");
+        db.execute("INSERT INTO events (a, b, v) VALUES (2, 1, 5)")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT a, b, COUNT(*), SUM(v) \
+                 FROM events GROUP BY a, b ORDER BY a, b",
+            )
+            .expect("select");
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    Value::Integer(1),
+                    Value::Integer(1),
+                    Value::Integer(2),
+                    Value::Integer(5),
+                ],
+                vec![
+                    Value::Integer(1),
+                    Value::Integer(2),
+                    Value::Integer(1),
+                    Value::Integer(4),
+                ],
+                vec![
+                    Value::Integer(2),
+                    Value::Integer(1),
+                    Value::Integer(1),
+                    Value::Integer(5),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_select_distinct_all_grouped() {
+        let path = temp_db_path("execute_select_distinct_all_grouped");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE metrics (g INTEGER, v INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 10)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 10)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, 20)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, 21)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (3, 30)")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT DISTINCT COUNT(*) \
+                 FROM metrics GROUP BY g ORDER BY 1",
+            )
+            .expect("select");
+        assert_eq!(
+            result.rows,
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]
+        );
+
+        let result = db
+            .execute(
+                "SELECT ALL COUNT(*) \
+                 FROM metrics GROUP BY g ORDER BY 1",
+            )
+            .expect("select");
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(1)],
+                vec![Value::Integer(2)],
+                vec![Value::Integer(2)],
+            ]
+        );
+
+        let result = db
+            .execute(
+                "SELECT DISTINCT * \
+                 FROM metrics GROUP BY g, v ORDER BY g, v",
+            )
+            .expect("select");
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(1), Value::Integer(10)],
+                vec![Value::Integer(2), Value::Integer(20)],
+                vec![Value::Integer(2), Value::Integer(21)],
+                vec![Value::Integer(3), Value::Integer(30)],
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_having_predicate_operators() {
+        let path = temp_db_path("execute_having_predicate_operators");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE metrics (g INTEGER, v INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 1)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 2)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, NULL)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, 3)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, 4)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, NULL)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (3, NULL)")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT g FROM metrics GROUP BY g \
+                 HAVING AVG(v) BETWEEN 1.5 AND 3.5 ORDER BY g",
+            )
+            .expect("select");
+        assert_eq!(
+            result.rows,
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]
+        );
+
+        let result = db
+            .execute(
+                "SELECT g FROM metrics GROUP BY g \
+                 HAVING SUM(v) IN (3, 7) ORDER BY g",
+            )
+            .expect("select");
+        assert_eq!(
+            result.rows,
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]
+        );
+
+        let result = db
+            .execute(
+                "SELECT g FROM metrics GROUP BY g \
+                 HAVING SUM(v) NOT IN (3) ORDER BY g",
+            )
+            .expect("select");
+        assert_eq!(result.rows, vec![vec![Value::Integer(2)]]);
+
+        let result = db
+            .execute(
+                "SELECT g FROM metrics GROUP BY g \
+                 HAVING MIN(v) IS NULL ORDER BY g",
+            )
+            .expect("select");
+        assert_eq!(result.rows, vec![vec![Value::Integer(3)]]);
+
+        let result = db
+            .execute(
+                "SELECT g FROM metrics GROUP BY g \
+                 HAVING MAX(v) IS NOT NULL ORDER BY g",
+            )
+            .expect("select");
+        assert_eq!(
+            result.rows,
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]
+        );
+    }
+
+    #[test]
+    fn execute_group_by_alias_resolution() {
+        let path = temp_db_path("execute_group_by_alias_resolution");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE metrics (g INTEGER, v INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 10)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (1, 20)")
+            .expect("insert row");
+        db.execute("INSERT INTO metrics (g, v) VALUES (2, 30)")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT m.g, COUNT(*) \
+                 FROM metrics AS m \
+                 GROUP BY m.g \
+                 HAVING SUM(m.v) > 20 \
+                 ORDER BY m.g",
+            )
+            .expect("select");
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(1), Value::Integer(2)],
+                vec![Value::Integer(2), Value::Integer(1)],
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_cross_join_group_by() {
+        let path = temp_db_path("execute_cross_join_group_by");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE a (id INTEGER)")
+            .expect("create table");
+        db.execute("CREATE TABLE b (val INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO a (id) VALUES (1)")
+            .expect("insert row");
+        db.execute("INSERT INTO a (id) VALUES (2)")
+            .expect("insert row");
+        db.execute("INSERT INTO b (val) VALUES (10)")
+            .expect("insert row");
+        db.execute("INSERT INTO b (val) VALUES (20)")
+            .expect("insert row");
+        db.execute("INSERT INTO b (val) VALUES (30)")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT a.id, COUNT(*) \
+                 FROM a CROSS JOIN b \
+                 GROUP BY a.id ORDER BY a.id",
+            )
+            .expect("select");
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(1), Value::Integer(3)],
+                vec![Value::Integer(2), Value::Integer(3)],
+            ]
+        );
     }
 
     #[test]

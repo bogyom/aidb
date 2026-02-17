@@ -1,0 +1,14 @@
+name: having-where-ops
+
+description: >
+  Ensure BETWEEN, IN, NOT IN, IS NULL, IS NOT NULL work in WHERE and HAVING.
+
+story_points: 3
+
+acceptence_critria:
+  - Predicate operators behave consistently in WHERE and HAVING
+  - NULL semantics are correct for BETWEEN/IN/IS NULL
+  - Unit tests cover these operators in HAVING
+
+deppends_on:
+  - task_00081

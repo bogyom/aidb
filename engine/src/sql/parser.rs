@@ -44,6 +44,14 @@ pub enum TypeName {
     Boolean,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastType {
+    Signed,
+    Integer,
+    Decimal,
+    Real,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropTable {
     pub name: String,
@@ -58,9 +66,12 @@ pub struct Insert {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Select {
+    pub modifier: SelectModifier,
     pub items: Vec<SelectItem>,
     pub from: Vec<FromClause>,
     pub filter: Option<Expr>,
+    pub group_by: Vec<Expr>,
+    pub having: Option<Expr>,
     pub order_by: Vec<OrderBy>,
     pub limit: Option<u64>,
 }
@@ -95,6 +106,12 @@ pub enum SelectItem {
     Expr(Expr),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectModifier {
+    All,
+    Distinct,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderBy {
     pub expr: Expr,
@@ -113,6 +130,7 @@ pub enum Expr {
     Literal(Literal),
     Unary { op: UnaryOp, expr: Box<Expr> },
     Binary { left: Box<Expr>, op: BinaryOp, right: Box<Expr> },
+    Cast { expr: Box<Expr>, ty: CastType },
     IsNull { expr: Box<Expr>, negated: bool },
     InList {
         expr: Box<Expr>,
@@ -130,7 +148,11 @@ pub enum Expr {
         when_thens: Vec<(Expr, Expr)>,
         else_expr: Option<Box<Expr>>,
     },
-    Function { name: String, args: Vec<FunctionArg> },
+    Function {
+        name: String,
+        modifier: FunctionModifier,
+        args: Vec<FunctionArg>,
+    },
     Subquery(Box<Select>),
     Exists(Box<Select>),
 }
@@ -139,6 +161,7 @@ pub enum Expr {
 pub enum UnaryOp {
     Not,
     Neg,
+    Pos,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +176,7 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    DivInt,
     And,
     Or,
 }
@@ -161,6 +185,12 @@ pub enum BinaryOp {
 pub enum FunctionArg {
     Expr(Expr),
     Star,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionModifier {
+    All,
+    Distinct,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,6 +388,13 @@ fn parse_select(stream: &mut TokenStream) -> Result<Select, ParseError> {
 }
 
 fn parse_select_body(stream: &mut TokenStream) -> Result<Select, ParseError> {
+    let modifier = if stream.consume_keyword(Keyword::Distinct) {
+        SelectModifier::Distinct
+    } else if stream.consume_keyword(Keyword::All) {
+        SelectModifier::All
+    } else {
+        SelectModifier::All
+    };
     let mut items = Vec::new();
 
     if stream.consume_symbol(Symbol::Star) {
@@ -389,7 +426,12 @@ fn parse_select_body(stream: &mut TokenStream) -> Result<Select, ParseError> {
                 None
             };
             from.push(FromClause { table, alias });
+
             if stream.consume_symbol(Symbol::Comma) {
+                continue;
+            }
+            if stream.consume_keyword(Keyword::Cross) {
+                stream.expect_keyword(Keyword::Join)?;
                 continue;
             }
             break;
@@ -397,6 +439,24 @@ fn parse_select_body(stream: &mut TokenStream) -> Result<Select, ParseError> {
     }
 
     let filter = if stream.consume_keyword(Keyword::Where) {
+        Some(parse_expr(stream)?)
+    } else {
+        None
+    };
+
+    let mut group_by = Vec::new();
+    if stream.consume_keyword(Keyword::Group) {
+        stream.expect_keyword(Keyword::By)?;
+        loop {
+            group_by.push(parse_expr(stream)?);
+            if stream.consume_symbol(Symbol::Comma) {
+                continue;
+            }
+            break;
+        }
+    }
+
+    let having = if stream.consume_keyword(Keyword::Having) {
         Some(parse_expr(stream)?)
     } else {
         None
@@ -435,9 +495,12 @@ fn parse_select_body(stream: &mut TokenStream) -> Result<Select, ParseError> {
     };
 
     Ok(Select {
+        modifier,
         items,
         from,
         filter,
+        group_by,
+        having,
         order_by,
         limit,
     })
@@ -504,6 +567,20 @@ fn parse_type_name(stream: &mut TokenStream) -> Result<TypeName, ParseError> {
         Ok(TypeName::Text)
     } else {
         Err(stream.error("expected type name", None))
+    }
+}
+
+fn parse_cast_type(stream: &mut TokenStream) -> Result<CastType, ParseError> {
+    if stream.consume_keyword(Keyword::Signed) {
+        Ok(CastType::Signed)
+    } else if stream.consume_keyword(Keyword::Integer) {
+        Ok(CastType::Integer)
+    } else if stream.consume_keyword(Keyword::Decimal) {
+        Ok(CastType::Decimal)
+    } else if stream.consume_keyword(Keyword::Real) {
+        Ok(CastType::Real)
+    } else {
+        Err(stream.error("expected cast type", None))
     }
 }
 
@@ -691,6 +768,13 @@ fn parse_multiplicative(stream: &mut TokenStream) -> Result<Expr, ParseError> {
                 op: BinaryOp::Div,
                 right: Box::new(right),
             };
+        } else if stream.consume_keyword(Keyword::Div) {
+            let right = parse_unary(stream)?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::DivInt,
+                right: Box::new(right),
+            };
         } else {
             break;
         }
@@ -703,6 +787,13 @@ fn parse_unary(stream: &mut TokenStream) -> Result<Expr, ParseError> {
         let expr = parse_unary(stream)?;
         return Ok(Expr::Unary {
             op: UnaryOp::Neg,
+            expr: Box::new(expr),
+        });
+    }
+    if stream.consume_symbol(Symbol::Plus) {
+        let expr = parse_unary(stream)?;
+        return Ok(Expr::Unary {
+            op: UnaryOp::Pos,
             expr: Box::new(expr),
         });
     }
@@ -739,12 +830,24 @@ fn parse_primary(stream: &mut TokenStream) -> Result<Expr, ParseError> {
 
     if let Some(identifier) = stream.consume_identifier() {
         if stream.consume_symbol(Symbol::LParen) {
-            let args = parse_function_args(stream)?;
-            stream.expect_symbol(Symbol::RParen)?;
-            return Ok(Expr::Function {
-                name: identifier,
-                args,
-            });
+            if identifier.eq_ignore_ascii_case("cast") {
+                let expr = parse_expr(stream)?;
+                stream.expect_keyword(Keyword::As)?;
+                let ty = parse_cast_type(stream)?;
+                stream.expect_symbol(Symbol::RParen)?;
+                return Ok(Expr::Cast {
+                    expr: Box::new(expr),
+                    ty,
+                });
+            } else {
+                let (modifier, args) = parse_function_args(stream)?;
+                stream.expect_symbol(Symbol::RParen)?;
+                return Ok(Expr::Function {
+                    name: identifier,
+                    modifier,
+                    args,
+                });
+            }
         }
 
         let mut parts = vec![identifier];
@@ -757,12 +860,21 @@ fn parse_primary(stream: &mut TokenStream) -> Result<Expr, ParseError> {
     Err(stream.error("expected expression", None))
 }
 
-fn parse_function_args(stream: &mut TokenStream) -> Result<Vec<FunctionArg>, ParseError> {
+fn parse_function_args(
+    stream: &mut TokenStream,
+) -> Result<(FunctionModifier, Vec<FunctionArg>), ParseError> {
     let mut args = Vec::new();
+    let mut modifier = FunctionModifier::All;
     let checkpoint = stream.position();
     if stream.consume_symbol(Symbol::RParen) {
         stream.reset(checkpoint);
-        return Ok(args);
+        return Ok((modifier, args));
+    }
+
+    if stream.consume_keyword(Keyword::Distinct) {
+        modifier = FunctionModifier::Distinct;
+    } else if stream.consume_keyword(Keyword::All) {
+        modifier = FunctionModifier::All;
     }
 
     if stream.consume_symbol(Symbol::Star) {
@@ -773,7 +885,7 @@ fn parse_function_args(stream: &mut TokenStream) -> Result<Vec<FunctionArg>, Par
             args.push(FunctionArg::Expr(parse_expr(stream)?));
         }
     }
-    Ok(args)
+    Ok((modifier, args))
 }
 
 fn parse_case(stream: &mut TokenStream) -> Result<Expr, ParseError> {
@@ -978,6 +1090,152 @@ mod tests {
                     OrderDirection::Desc
                 ));
                 assert_eq!(stmt.limit, Some(10));
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_cross_join_sources() {
+        let sql = "SELECT * FROM a CROSS JOIN b, c";
+        let statements = parse(sql).expect("parse");
+        match &statements[0] {
+            Statement::Select(stmt) => {
+                assert_eq!(stmt.from.len(), 3);
+                assert_eq!(stmt.from[0].table, "a");
+                assert_eq!(stmt.from[1].table, "b");
+                assert_eq!(stmt.from[2].table, "c");
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_group_by_expressions() {
+        let sql = "SELECT col1 FROM t GROUP BY col1, col2, col1";
+        let statements = parse(sql).expect("parse");
+        match &statements[0] {
+            Statement::Select(stmt) => {
+                assert_eq!(stmt.group_by.len(), 3);
+                assert!(matches!(
+                    &stmt.group_by[0],
+                    Expr::Identifier(parts) if parts == &vec!["col1".to_string()]
+                ));
+                assert!(matches!(
+                    &stmt.group_by[1],
+                    Expr::Identifier(parts) if parts == &vec!["col2".to_string()]
+                ));
+                assert!(matches!(
+                    &stmt.group_by[2],
+                    Expr::Identifier(parts) if parts == &vec!["col1".to_string()]
+                ));
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_having_expressions() {
+        let sql = "SELECT col1 FROM t GROUP BY col1 HAVING col1 > 1 AND col1 < 10";
+        let statements = parse(sql).expect("parse");
+        match &statements[0] {
+            Statement::Select(stmt) => {
+                let having = stmt.having.as_ref().expect("having");
+                assert!(matches!(
+                    having,
+                    Expr::Binary { op: BinaryOp::And, .. }
+                ));
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_unary_plus_expression() {
+        let sql = "SELECT +1";
+        let statements = parse(sql).expect("parse");
+        match &statements[0] {
+            Statement::Select(stmt) => match &stmt.items[0] {
+                SelectItem::Expr(Expr::Unary { op, expr }) => {
+                    assert!(matches!(op, UnaryOp::Pos));
+                    assert!(matches!(
+                        &**expr,
+                        Expr::Literal(Literal::Number(value)) if value == "1"
+                    ));
+                }
+                _ => panic!("expected unary plus expression"),
+            },
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_case_expression_in_grouped_query() {
+        let sql = "SELECT CASE WHEN col1 = 1 THEN 'one' ELSE 'other' END \
+                   FROM t GROUP BY col1 \
+                   HAVING CASE WHEN col1 = 1 THEN TRUE ELSE FALSE END";
+        let statements = parse(sql).expect("parse");
+        match &statements[0] {
+            Statement::Select(stmt) => {
+                assert_eq!(stmt.group_by.len(), 1);
+                assert!(matches!(
+                    &stmt.items[0],
+                    SelectItem::Expr(Expr::Case { .. })
+                ));
+                assert!(matches!(stmt.having.as_ref(), Some(Expr::Case { .. })));
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_cast_types() {
+        let sql = "SELECT CAST(1 AS SIGNED), CAST(2 AS INTEGER), \
+                   CAST(NULL AS DECIMAL), CAST(3 AS REAL)";
+        let statements = parse(sql).expect("parse");
+        match &statements[0] {
+            Statement::Select(stmt) => {
+                assert_eq!(stmt.items.len(), 4);
+                let expect = [CastType::Signed, CastType::Integer, CastType::Decimal, CastType::Real];
+                for (item, ty) in stmt.items.iter().zip(expect.iter()) {
+                    match item {
+                        SelectItem::Expr(Expr::Cast { ty: actual, .. }) => {
+                            assert_eq!(actual, ty);
+                        }
+                        _ => panic!("expected cast expression"),
+                    }
+                }
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_div_and_slash_in_where_having() {
+        let sql = "SELECT col1 FROM t WHERE col1 DIV 2 = 1 GROUP BY col1 HAVING col1 / 2 = 1";
+        let statements = parse(sql).expect("parse");
+        match &statements[0] {
+            Statement::Select(stmt) => {
+                let filter = stmt.filter.as_ref().expect("filter");
+                match filter {
+                    Expr::Binary { left, op: BinaryOp::Eq, .. } => {
+                        assert!(matches!(
+                            &**left,
+                            Expr::Binary { op: BinaryOp::DivInt, .. }
+                        ));
+                    }
+                    _ => panic!("expected DIV expression in WHERE"),
+                }
+                let having = stmt.having.as_ref().expect("having");
+                match having {
+                    Expr::Binary { left, op: BinaryOp::Eq, .. } => {
+                        assert!(matches!(
+                            &**left,
+                            Expr::Binary { op: BinaryOp::Div, .. }
+                        ));
+                    }
+                    _ => panic!("expected / expression in HAVING"),
+                }
             }
             _ => panic!("expected select"),
         }

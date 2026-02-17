@@ -1,0 +1,14 @@
+name: groupby-alias-resolution
+
+description: >
+  Ensure table aliases and qualified column resolution works in grouped queries.
+
+story_points: 3
+
+acceptence_critria:
+  - Aliases resolve in SELECT, GROUP BY, and HAVING
+  - Qualified columns (t.col) resolve correctly
+  - Unit tests cover alias resolution in grouped queries
+
+deppends_on:
+  - task_00088

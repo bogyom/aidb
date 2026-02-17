@@ -1,0 +1,14 @@
+name: csv-import-row-arity
+
+description: >
+  Validate row arity vs. target columns.
+
+story_points: 2
+
+acceptence_critria:
+  - Row length validated against mapped columns
+  - Mismatches produce clear errors
+  - Unit tests cover arity mismatches
+
+deppends_on:
+  - task_00121

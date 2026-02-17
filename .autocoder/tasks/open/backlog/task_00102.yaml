@@ -1,0 +1,14 @@
+name: index-catalog-persist
+
+description: >
+  Persist index metadata in catalog serialization.
+
+story_points: 3
+
+acceptence_critria:
+  - Index metadata is written to catalog pages
+  - Index metadata is restored on startup
+  - Unit tests cover catalog persistence for indexes
+
+deppends_on:
+  - 

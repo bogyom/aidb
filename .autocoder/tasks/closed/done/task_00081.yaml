@@ -1,0 +1,14 @@
+name: having-parse
+
+description: >
+  Add parser support for HAVING clauses on SELECT statements.
+
+story_points: 2
+
+acceptence_critria:
+  - Parser accepts HAVING with arbitrary boolean expressions
+  - HAVING attaches to SELECT AST correctly
+  - Unit tests added for HAVING parsing
+
+deppends_on:
+  - task_00080

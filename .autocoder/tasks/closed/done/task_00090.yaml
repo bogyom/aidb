@@ -1,0 +1,14 @@
+name: aggregates-modifiers
+
+description: >
+  Support ALL vs DISTINCT modifiers for aggregate functions.
+
+story_points: 3
+
+acceptence_critria:
+  - ALL preserves duplicates, DISTINCT de-duplicates inputs
+  - Distinct tracking works for scalar aggregate inputs
+  - Unit tests cover DISTINCT aggregates
+
+deppends_on:
+  - task_00089

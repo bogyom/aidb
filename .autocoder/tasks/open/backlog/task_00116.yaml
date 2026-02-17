@@ -1,0 +1,14 @@
+name: sqllogictest-index-suite
+
+description: >
+  Run and fix tests/sqllogictest/test/index suite.
+
+story_points: 2
+
+acceptence_critria:
+  - Index suite runs under sqllogictest_harness
+  - All index tests pass
+  - Any regressions covered by added tests
+
+deppends_on:
+  - 

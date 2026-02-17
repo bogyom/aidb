@@ -208,6 +208,14 @@ fn validate_select(select: &Select, catalog: &Catalog) -> Result<(), ValidationE
         validate_expr(filter, &tables)?;
     }
 
+    for expr in &select.group_by {
+        validate_expr(expr, &tables)?;
+    }
+
+    if let Some(having) = &select.having {
+        validate_expr(having, &tables)?;
+    }
+
     for OrderBy { expr, direction: _ } in &select.order_by {
         validate_expr(expr, &tables)?;
     }
@@ -223,6 +231,7 @@ fn validate_expr(
         Expr::Identifier(parts) => validate_identifier(parts, tables),
         Expr::Literal(_) => Ok(()),
         Expr::Unary { expr, .. } => validate_expr(expr, tables),
+        Expr::Cast { expr, .. } => validate_expr(expr, tables),
         Expr::Binary { left, right, .. } => {
             validate_expr(left, tables)?;
             validate_expr(right, tables)
@@ -334,6 +343,7 @@ fn expr_contains_identifier(expr: &Expr) -> bool {
         Expr::Identifier(_) => true,
         Expr::Literal(_) => false,
         Expr::Unary { expr, .. } => expr_contains_identifier(expr),
+        Expr::Cast { expr, .. } => expr_contains_identifier(expr),
         Expr::Binary { left, right, .. } => {
             expr_contains_identifier(left) || expr_contains_identifier(right)
         }
@@ -398,12 +408,15 @@ mod tests {
     fn rejects_missing_table() {
         let catalog = Catalog::new();
         let stmt = Statement::Select(Select {
+            modifier: parser::SelectModifier::All,
             items: vec![SelectItem::Wildcard(None)],
             from: vec![parser::FromClause {
                 table: "users".to_string(),
                 alias: None,
             }],
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: Vec::new(),
             limit: None,
         });
@@ -415,6 +428,7 @@ mod tests {
     fn rejects_unknown_column() {
         let catalog = catalog_with_users();
         let stmt = Statement::Select(Select {
+            modifier: parser::SelectModifier::All,
             items: vec![SelectItem::Expr(Expr::Identifier(vec![
                 "age".to_string(),
             ]))],
@@ -423,11 +437,75 @@ mod tests {
                 alias: None,
             }],
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: Vec::new(),
             limit: None,
         });
         let err = validate_statement(&stmt, &catalog).expect_err("error");
         assert!(matches!(err, ValidationError::ColumnNotFound { .. }));
+    }
+
+    #[test]
+    fn rejects_group_by_unknown_column() {
+        let catalog = catalog_with_users();
+        let stmt = Statement::Select(Select {
+            modifier: parser::SelectModifier::All,
+            items: vec![SelectItem::Wildcard(None)],
+            from: vec![parser::FromClause {
+                table: "users".to_string(),
+                alias: None,
+            }],
+            filter: None,
+            group_by: vec![Expr::Identifier(vec!["age".to_string()])],
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+        });
+        let err = validate_statement(&stmt, &catalog).expect_err("error");
+        assert!(matches!(err, ValidationError::ColumnNotFound { .. }));
+    }
+
+    #[test]
+    fn rejects_having_unknown_column() {
+        let catalog = catalog_with_users();
+        let stmt = Statement::Select(Select {
+            modifier: parser::SelectModifier::All,
+            items: vec![SelectItem::Wildcard(None)],
+            from: vec![parser::FromClause {
+                table: "users".to_string(),
+                alias: None,
+            }],
+            filter: None,
+            group_by: vec![Expr::Identifier(vec!["id".to_string()])],
+            having: Some(Expr::Identifier(vec!["age".to_string()])),
+            order_by: Vec::new(),
+            limit: None,
+        });
+        let err = validate_statement(&stmt, &catalog).expect_err("error");
+        assert!(matches!(err, ValidationError::ColumnNotFound { .. }));
+    }
+
+    #[test]
+    fn allows_group_by_table_alias() {
+        let catalog = catalog_with_users();
+        let stmt = Statement::Select(Select {
+            modifier: parser::SelectModifier::All,
+            items: vec![SelectItem::Wildcard(None)],
+            from: vec![parser::FromClause {
+                table: "users".to_string(),
+                alias: Some("u".to_string()),
+            }],
+            filter: None,
+            group_by: vec![Expr::Identifier(vec![
+                "u".to_string(),
+                "id".to_string(),
+            ])],
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+        });
+        validate_statement(&stmt, &catalog).expect("valid");
     }
 
     #[test]
@@ -458,11 +536,14 @@ mod tests {
     fn rejects_select_identifier_without_from() {
         let catalog = catalog_with_users();
         let stmt = Statement::Select(Select {
+            modifier: parser::SelectModifier::All,
             items: vec![SelectItem::Expr(Expr::Identifier(vec![
                 "id".to_string(),
             ]))],
             from: vec![],
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: Vec::new(),
             limit: None,
         });
@@ -474,6 +555,7 @@ mod tests {
     fn allows_select_literal_without_from() {
         let catalog = catalog_with_users();
         let stmt = Statement::Select(Select {
+            modifier: parser::SelectModifier::All,
             items: vec![SelectItem::Expr(Expr::Literal(
                 super::super::lexer::Literal::Number("1".to_string()),
             ))],
@@ -487,6 +569,8 @@ mod tests {
                     "1".to_string(),
                 ))),
             }),
+            group_by: Vec::new(),
+            having: None,
             order_by: Vec::new(),
             limit: None,
         });

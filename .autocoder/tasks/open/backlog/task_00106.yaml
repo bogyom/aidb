@@ -1,0 +1,14 @@
+name: drop-index-exec
+
+description: >
+  Execute DROP INDEX: remove catalog entry and free index pages.
+
+story_points: 3
+
+acceptence_critria:
+  - Index metadata is removed
+  - Index pages are freed
+  - Unit tests cover DROP INDEX execution
+
+deppends_on:
+  - 

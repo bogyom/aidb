@@ -1,0 +1,14 @@
+name: create-index-unique-parse
+
+description: >
+  Implement CREATE INDEX parsing for UNIQUE (if needed by tests).
+
+story_points: 2
+
+acceptence_critria:
+  - Parser accepts CREATE UNIQUE INDEX
+  - AST stores unique flag
+  - Unit tests cover UNIQUE parsing
+
+deppends_on:
+  - 

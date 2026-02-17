@@ -1,0 +1,14 @@
+name: csv-import-header-mapping
+
+description: >
+  Implement header handling and column mapping.
+
+story_points: 3
+
+acceptence_critria:
+  - Header row optional and parsed correctly
+  - Columns mapped to table schema
+  - Unit tests cover header mapping
+
+deppends_on:
+  - task_00120

@@ -1,0 +1,14 @@
+name: groupby-planner
+
+description: >
+  Add planner nodes for GROUP BY and HAVING execution.
+
+story_points: 3
+
+acceptence_critria:
+  - Planner produces GroupBy/Having nodes from SELECT AST
+  - Plan includes group keys and aggregate expressions
+  - Unit tests cover planning grouped queries
+
+deppends_on:
+  - task_00087

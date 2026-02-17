@@ -1,0 +1,14 @@
+name: index-journal-support
+
+description: >
+  Add journal support for index page changes.
+
+story_points: 4
+
+acceptence_critria:
+  - Index page writes are journaled
+  - Rollback restores index pages
+  - Recovery replays journal correctly for indexes
+
+deppends_on:
+  - 

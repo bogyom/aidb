@@ -1,0 +1,14 @@
+name: csv-import-batching
+
+description: >
+  Implement batched insert execution with configurable batch size.
+
+story_points: 3
+
+acceptence_critria:
+  - Rows are inserted in batches
+  - Batch size is configurable
+  - Unit tests cover batch boundaries
+
+deppends_on:
+  - task_00122

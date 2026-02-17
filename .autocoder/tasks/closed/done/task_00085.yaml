@@ -1,0 +1,14 @@
+name: cast-types-extend
+
+description: >
+  Extend CAST to accept SIGNED, INTEGER, DECIMAL, REAL and perform numeric conversions.
+
+story_points: 3
+
+acceptence_critria:
+  - CAST accepts SIGNED, INTEGER, DECIMAL, REAL type names
+  - Numeric conversions follow existing type rules
+  - Unit tests cover CAST in expressions and aggregates
+
+deppends_on:
+  - 

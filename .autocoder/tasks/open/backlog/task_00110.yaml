@@ -1,0 +1,14 @@
+name: index-eq-lookup
+
+description: >
+  Implement index search for equality predicates.
+
+story_points: 3
+
+acceptence_critria:
+  - Equality lookup returns correct row references
+  - Handles multiple matches
+  - Unit tests cover equality index scans
+
+deppends_on:
+  - 

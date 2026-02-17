@@ -1,0 +1,14 @@
+name: index-page-type
+
+description: >
+  Add index header/page type handling in the storage layer.
+
+story_points: 2
+
+acceptence_critria:
+  - PageType::Index is readable/writable in file header
+  - Index pages can be allocated and freed
+  - Unit tests cover page allocation for index
+
+deppends_on:
+  - 

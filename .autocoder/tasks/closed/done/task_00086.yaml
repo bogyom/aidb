@@ -1,0 +1,14 @@
+name: div-operator
+
+description: >
+  Implement DIV integer-division operator and ensure / supports real division.
+
+story_points: 3
+
+acceptence_critria:
+  - DIV is parsed as integer division
+  - / evaluates as real division when needed
+  - Unit tests cover DIV and / in WHERE/HAVING
+
+deppends_on:
+  - 

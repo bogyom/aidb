@@ -1,0 +1,14 @@
+name: planner-index-scan
+
+description: >
+  Add planner rule to choose index scan for simple predicates.
+
+story_points: 3
+
+acceptence_critria:
+  - Planner selects index scan when predicate matches index
+  - Fallback to table scan when no index
+  - Unit tests cover planner selection
+
+deppends_on:
+  - 

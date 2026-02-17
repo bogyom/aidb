@@ -1,0 +1,14 @@
+name: csv-import-stream-reader
+
+description: >
+  Implement streaming CSV reader (line/record iterator).
+
+story_points: 3
+
+acceptence_critria:
+  - CSV reader processes records incrementally
+  - Handles delimiter/quote/escape settings
+  - Unit tests cover basic parsing cases
+
+deppends_on:
+  - task_00119

@@ -1,0 +1,14 @@
+name: csv-import-type-conversion
+
+description: >
+  Implement value parsing and type conversion per column.
+
+story_points: 4
+
+acceptence_critria:
+  - String values converted to column SQL types
+  - Invalid conversions produce errors
+  - Unit tests cover integer/real/text/boolean parsing
+
+deppends_on:
+  - task_00121

@@ -1,0 +1,14 @@
+name: count-star-all
+
+description: >
+  Implement COUNT(*) and COUNT(ALL expr) semantics.
+
+story_points: 2
+
+acceptence_critria:
+  - COUNT(*) counts rows in group
+  - COUNT(ALL expr) counts non-NULL expr values
+  - Unit tests cover COUNT(*) and COUNT(ALL expr)
+
+deppends_on:
+  - task_00089

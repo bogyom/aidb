@@ -1,0 +1,14 @@
+name: index-range-scan
+
+description: >
+  Implement index range scan for orderable predicates.
+
+story_points: 4
+
+acceptence_critria:
+  - Range scan supports <, <=, >, >= bounds
+  - Ordering is consistent with key order
+  - Unit tests cover range scans
+
+deppends_on:
+  - 

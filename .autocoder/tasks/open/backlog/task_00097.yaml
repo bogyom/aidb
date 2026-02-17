@@ -1,0 +1,14 @@
+name: select-item-aliases
+
+description: >
+  Add support for select-item aliases (expr AS name and implicit aliases) in parsing and execution.
+
+story_points: 3
+
+acceptence_critria:
+  - Parser records aliases for select expressions
+  - Executor outputs column names using aliases
+  - Unit tests cover AS and implicit aliases
+
+deppends_on:
+  - 

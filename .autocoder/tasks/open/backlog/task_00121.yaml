@@ -1,0 +1,14 @@
+name: csv-import-server-endpoint
+
+description: >
+  Implement server endpoint routing and request parsing for import.
+
+story_points: 3
+
+acceptence_critria:
+  - Server exposes import endpoint
+  - Request body parsed (multipart or raw)
+  - Endpoint wired to import handler
+
+deppends_on:
+  - 

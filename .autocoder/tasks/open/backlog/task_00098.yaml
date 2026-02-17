@@ -1,0 +1,14 @@
+name: select-distinct-all-global
+
+description: >
+  Implement SELECT DISTINCT / SELECT ALL semantics for non-grouped queries.
+
+story_points: 3
+
+acceptence_critria:
+  - SELECT ALL is accepted as default behavior
+  - SELECT DISTINCT de-duplicates result rows
+  - Unit tests cover DISTINCT vs ALL
+
+deppends_on:
+  - 

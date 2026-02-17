@@ -1,0 +1,14 @@
+name: index-tests
+
+description: >
+  Add tests for index creation, lookup, and DML maintenance.
+
+story_points: 2
+
+acceptence_critria:
+  - Unit/integration tests for index build and scans
+  - Tests cover INSERT/UPDATE/DELETE maintenance
+  - Tests cover unique constraints if enabled
+
+deppends_on:
+  - 

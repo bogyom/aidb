@@ -1,0 +1,14 @@
+name: drop-index-parse-validate
+
+description: >
+  Implement DROP INDEX parsing and validation.
+
+story_points: 2
+
+acceptence_critria:
+  - Parser accepts DROP INDEX
+  - Validation checks index exists
+  - Unit tests cover DROP INDEX parsing
+
+deppends_on:
+  - 

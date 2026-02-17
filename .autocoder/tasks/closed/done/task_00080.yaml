@@ -1,0 +1,14 @@
+name: groupby-parse
+
+description: >
+  Add parser support for GROUP BY clauses, including multiple keys and duplicate keys.
+
+story_points: 3
+
+acceptence_critria:
+  - Parser accepts GROUP BY with one or more expressions
+  - Duplicate keys in GROUP BY are preserved in the AST
+  - Unit tests added for GROUP BY parsing
+
+deppends_on:
+  - 

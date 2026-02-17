@@ -375,11 +375,12 @@ fn parse_inner(loc: &Location, script: &str) -> Result<Vec<Record>, ParseError> 
     let mut conditions = vec![];
 
     while let Some((mut num, mut line)) = lines.next() {
+        line = line.trim_end_matches('\r');
         if let Some(text) = line.strip_prefix('#') {
             let mut comments = vec![text.to_string()];
             for (num_, line_) in lines.by_ref() {
                 num = num_;
-                line = line_;
+                line = line_.trim_end_matches('\r');
                 if let Some(text) = line.strip_prefix('#') {
                     comments.push(text.to_string());
                 } else {
@@ -388,6 +389,16 @@ fn parse_inner(loc: &Location, script: &str) -> Result<Vec<Record>, ParseError> 
             }
 
             records.push(Record::Comment(comments));
+        }
+
+        if line.is_empty() {
+            continue;
+        }
+
+        if !line.starts_with('#') {
+            if let Some((head, _)) = line.split_once('#') {
+                line = head.trim_end();
+            }
         }
 
         if line.is_empty() {
@@ -454,10 +465,11 @@ fn parse_inner(loc: &Location, script: &str) -> Result<Vec<Record>, ParseError> 
                     _ => return Err(ParseErrorKind::InvalidLine(line.into()).at(loc)),
                 };
                 let mut sql = match lines.next() {
-                    Some((_, line)) => line.into(),
+                    Some((_, line)) => line.trim_end_matches('\r').to_string(),
                     None => return Err(ParseErrorKind::UnexpectedEOF.at(loc.next_line())),
                 };
                 for (_, line) in &mut lines {
+                    let line = line.trim_end_matches('\r');
                     if line.is_empty() {
                         break;
                     }
@@ -503,11 +515,12 @@ fn parse_inner(loc: &Location, script: &str) -> Result<Vec<Record>, ParseError> 
                 // The SQL for the query is found on second an subsequent lines of the record
                 // up to first line of the form "----" or until the end of the record.
                 let mut sql = match lines.next() {
-                    Some((_, line)) => line.into(),
+                    Some((_, line)) => line.trim_end_matches('\r').to_string(),
                     None => return Err(ParseErrorKind::UnexpectedEOF.at(loc.next_line())),
                 };
                 let mut has_result = false;
                 for (_, line) in &mut lines {
+                    let line = line.trim_end_matches('\r');
                     if line.is_empty() {
                         break;
                     }
@@ -522,6 +535,7 @@ fn parse_inner(loc: &Location, script: &str) -> Result<Vec<Record>, ParseError> 
                 let mut expected_results = vec![];
                 if has_result {
                     for (_, line) in &mut lines {
+                        let line = line.trim_end_matches('\r');
                         if line.is_empty() {
                             break;
                         }

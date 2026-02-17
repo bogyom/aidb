@@ -1,0 +1,14 @@
+name: index-maintenance-delete
+
+description: >
+  Update DELETE to remove index entries for affected indexes.
+
+story_points: 3
+
+acceptence_critria:
+  - DELETE removes corresponding index entries
+  - Index remains consistent after deletes
+  - Unit tests cover delete index maintenance
+
+deppends_on:
+  - 

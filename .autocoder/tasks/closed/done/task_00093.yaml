@@ -1,0 +1,14 @@
+name: select-distinct-all-grouped
+
+description: >
+  Handle SELECT DISTINCT/ALL on grouped results (including SELECT DISTINCT *).
+
+story_points: 2
+
+acceptence_critria:
+  - SELECT DISTINCT de-duplicates grouped output rows
+  - SELECT ALL is accepted as default
+  - Unit tests cover DISTINCT/ALL on grouped queries
+
+deppends_on:
+  - task_00092

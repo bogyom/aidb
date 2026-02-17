@@ -1,7 +1,7 @@
 use super::lexer::Literal as AstLiteral;
 use super::parser::{
-    Expr as AstExpr, FunctionArg as AstFunctionArg, OrderDirection, Select, SelectItem,
-    SetExpr, SetOp, Statement, UnaryOp as AstUnaryOp,
+    CastType, Expr as AstExpr, FunctionArg as AstFunctionArg, FunctionModifier, OrderDirection,
+    Select, SelectItem, SetExpr, SetOp, Statement, UnaryOp as AstUnaryOp,
 };
 use super::parser::BinaryOp as AstBinaryOp;
 use crate::{Catalog, ColumnMeta, SqlType, TableSchema, Value};
@@ -16,6 +16,12 @@ pub enum PlanNode {
     Values { rows: Vec<Vec<Value>> },
     Scan(TableScan),
     Filter { predicate: ExprPlan, input: Box<PlanNode> },
+    GroupBy {
+        keys: Vec<ExprPlan>,
+        aggregates: Vec<ProjectionItem>,
+        input: Box<PlanNode>,
+    },
+    Having { predicate: ExprPlan, input: Box<PlanNode> },
     Order { by: Vec<OrderByPlan>, input: Box<PlanNode> },
     Limit { limit: usize, input: Box<PlanNode> },
     Projection { items: Vec<ProjectionItem>, input: Box<PlanNode> },
@@ -61,6 +67,7 @@ pub enum ExprPlan {
     Literal(Value),
     Unary { op: UnaryOp, expr: Box<ExprPlan> },
     Binary { left: Box<ExprPlan>, op: BinaryOp, right: Box<ExprPlan> },
+    Cast { expr: Box<ExprPlan>, ty: CastType },
     Between {
         expr: Box<ExprPlan>,
         low: Box<ExprPlan>,
@@ -77,7 +84,11 @@ pub enum ExprPlan {
         when_thens: Vec<(ExprPlan, ExprPlan)>,
         else_expr: Option<Box<ExprPlan>>,
     },
-    Function { name: String, args: Vec<FunctionArgPlan> },
+    Function {
+        name: String,
+        modifier: FunctionModifier,
+        args: Vec<FunctionArgPlan>,
+    },
     Subquery(Box<Select>),
     Exists(Box<Select>),
     IsNull { expr: Box<ExprPlan>, negated: bool },
@@ -87,6 +98,7 @@ pub enum ExprPlan {
 pub enum UnaryOp {
     Not,
     Neg,
+    Pos,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +113,7 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    DivInt,
     And,
     Or,
 }
@@ -165,6 +178,45 @@ pub fn plan_select(select: &Select, catalog: &Catalog) -> Result<Plan, PlanError
         };
     }
 
+    let planned_items = plan_projection_items(&select.items, table)?;
+    let has_aggregate = planned_items.iter().any(|item| item.is_aggregate);
+    let needs_grouping =
+        !select.group_by.is_empty() || select.having.is_some() || has_aggregate;
+
+    if needs_grouping {
+        let mut keys = Vec::with_capacity(select.group_by.len());
+        for expr in &select.group_by {
+            keys.push(plan_expr(expr, table)?);
+        }
+
+        let mut aggregates: Vec<ProjectionItem> = planned_items
+            .iter()
+            .filter(|item| item.is_aggregate)
+            .cloned()
+            .collect();
+
+        let planned_having = if let Some(having) = &select.having {
+            let planned_having = plan_expr(having, table)?;
+            collect_aggregate_exprs(&planned_having, &mut aggregates);
+            Some(planned_having)
+        } else {
+            None
+        };
+
+        node = PlanNode::GroupBy {
+            keys,
+            aggregates,
+            input: Box::new(node),
+        };
+
+        if let Some(predicate) = planned_having {
+            node = PlanNode::Having {
+                predicate,
+                input: Box::new(node),
+            };
+        }
+    }
+
     if !select.order_by.is_empty() {
         let mut by = Vec::with_capacity(select.order_by.len());
         for order_by in &select.order_by {
@@ -187,7 +239,7 @@ pub fn plan_select(select: &Select, catalog: &Catalog) -> Result<Plan, PlanError
         };
     }
 
-    let items = plan_projection_items(&select.items, table)?;
+    let items = planned_items;
     node = PlanNode::Projection {
         items,
         input: Box::new(node),
@@ -236,8 +288,24 @@ fn output_columns(plan: &PlanNode) -> Result<Vec<ColumnMeta>, PlanError> {
             .map(|col| ColumnMeta::new(col.name.clone(), col.sql_type))
             .collect()),
         PlanNode::Filter { input, .. }
+        | PlanNode::Having { input, .. }
         | PlanNode::Order { input, .. }
         | PlanNode::Limit { input, .. } => output_columns(input),
+        PlanNode::GroupBy {
+            keys, aggregates, ..
+        } => {
+            let mut columns = Vec::with_capacity(keys.len() + aggregates.len());
+            for key in keys {
+                columns.push(ColumnMeta::new(label_for_expr(key), expr_plan_type(key)));
+            }
+            for aggregate in aggregates {
+                columns.push(ColumnMeta::new(
+                    aggregate.label.clone(),
+                    aggregate.sql_type,
+                ));
+            }
+            Ok(columns)
+        }
         PlanNode::Projection { items, .. } => Ok(items
             .iter()
             .map(|item| ColumnMeta::new(item.label.clone(), item.sql_type))
@@ -331,9 +399,10 @@ fn expr_contains_aggregate(expr: &ExprPlan) -> bool {
     match expr {
         ExprPlan::Function { name, .. } => {
             let name = name.to_ascii_lowercase();
-            name == "count" || name == "avg"
+            name == "count" || name == "avg" || name == "sum" || name == "min" || name == "max"
         }
         ExprPlan::Unary { expr, .. } => expr_contains_aggregate(expr),
+        ExprPlan::Cast { expr, .. } => expr_contains_aggregate(expr),
         ExprPlan::Binary { left, right, .. } => {
             expr_contains_aggregate(left) || expr_contains_aggregate(right)
         }
@@ -368,6 +437,64 @@ fn expr_contains_aggregate(expr: &ExprPlan) -> bool {
         ExprPlan::IsNull { expr, .. } => expr_contains_aggregate(expr),
         ExprPlan::Subquery(_) | ExprPlan::Exists(_) => false,
         ExprPlan::Column(_) | ExprPlan::Literal(_) => false,
+    }
+}
+
+fn collect_aggregate_exprs(expr: &ExprPlan, aggregates: &mut Vec<ProjectionItem>) {
+    match expr {
+        ExprPlan::Function { name, .. } => {
+            let name = name.to_ascii_lowercase();
+            if name == "count" || name == "avg" {
+                if !aggregates.iter().any(|item| item.expr == *expr) {
+                    let sql_type = expr_plan_type(expr);
+                    let label = label_for_expr(expr);
+                    aggregates.push(ProjectionItem {
+                        expr: expr.clone(),
+                        label,
+                        sql_type,
+                        is_aggregate: true,
+                    });
+                }
+            }
+        }
+        ExprPlan::Unary { expr, .. } => collect_aggregate_exprs(expr, aggregates),
+        ExprPlan::Cast { expr, .. } => collect_aggregate_exprs(expr, aggregates),
+        ExprPlan::Binary { left, right, .. } => {
+            collect_aggregate_exprs(left, aggregates);
+            collect_aggregate_exprs(right, aggregates);
+        }
+        ExprPlan::Between { expr, low, high, .. } => {
+            collect_aggregate_exprs(expr, aggregates);
+            collect_aggregate_exprs(low, aggregates);
+            collect_aggregate_exprs(high, aggregates);
+        }
+        ExprPlan::InList { expr, list, .. } => {
+            collect_aggregate_exprs(expr, aggregates);
+            for item in list {
+                collect_aggregate_exprs(item, aggregates);
+            }
+        }
+        ExprPlan::Case {
+            operand,
+            when_thens,
+            else_expr,
+        } => {
+            if let Some(operand) = operand {
+                collect_aggregate_exprs(operand, aggregates);
+            }
+            for (when_expr, then_expr) in when_thens {
+                collect_aggregate_exprs(when_expr, aggregates);
+                collect_aggregate_exprs(then_expr, aggregates);
+            }
+            if let Some(else_expr) = else_expr {
+                collect_aggregate_exprs(else_expr, aggregates);
+            }
+        }
+        ExprPlan::IsNull { expr, .. } => collect_aggregate_exprs(expr, aggregates),
+        ExprPlan::Column(_)
+        | ExprPlan::Literal(_)
+        | ExprPlan::Subquery(_)
+        | ExprPlan::Exists(_) => {}
     }
 }
 
@@ -412,10 +539,18 @@ fn plan_expr(expr: &AstExpr, table: Option<&TableSchema>) -> Result<ExprPlan, Pl
             let op = match op {
                 AstUnaryOp::Not => UnaryOp::Not,
                 AstUnaryOp::Neg => UnaryOp::Neg,
+                AstUnaryOp::Pos => UnaryOp::Pos,
             };
             Ok(ExprPlan::Unary {
                 op,
                 expr: Box::new(expr),
+            })
+        }
+        AstExpr::Cast { expr, ty } => {
+            let expr = plan_expr(expr, table)?;
+            Ok(ExprPlan::Cast {
+                expr: Box::new(expr),
+                ty: *ty,
             })
         }
         AstExpr::Binary { left, op, right } => {
@@ -432,6 +567,7 @@ fn plan_expr(expr: &AstExpr, table: Option<&TableSchema>) -> Result<ExprPlan, Pl
                 AstBinaryOp::Sub => BinaryOp::Sub,
                 AstBinaryOp::Mul => BinaryOp::Mul,
                 AstBinaryOp::Div => BinaryOp::Div,
+                AstBinaryOp::DivInt => BinaryOp::DivInt,
                 AstBinaryOp::And => BinaryOp::And,
                 AstBinaryOp::Or => BinaryOp::Or,
             };
@@ -497,7 +633,7 @@ fn plan_expr(expr: &AstExpr, table: Option<&TableSchema>) -> Result<ExprPlan, Pl
                 else_expr,
             })
         }
-        AstExpr::Function { name, args } => {
+        AstExpr::Function { name, modifier, args } => {
             let mut planned_args = Vec::with_capacity(args.len());
             for arg in args {
                 match arg {
@@ -507,9 +643,10 @@ fn plan_expr(expr: &AstExpr, table: Option<&TableSchema>) -> Result<ExprPlan, Pl
                     AstFunctionArg::Star => planned_args.push(FunctionArgPlan::Star),
                 }
             }
-            validate_function_arity(name, &planned_args)?;
+            validate_function_arity(name, *modifier, &planned_args)?;
             Ok(ExprPlan::Function {
                 name: name.clone(),
+                modifier: *modifier,
                 args: planned_args,
             })
         }
@@ -537,9 +674,16 @@ fn resolve_column(table: &TableSchema, name: &str) -> Result<ColumnRef, PlanErro
 
 fn validate_function_arity(
     name: &str,
+    modifier: FunctionModifier,
     args: &[FunctionArgPlan],
 ) -> Result<(), PlanError> {
     let lower = name.to_ascii_lowercase();
+    let is_aggregate = matches!(lower.as_str(), "count" | "avg" | "sum" | "min" | "max");
+    if matches!(modifier, FunctionModifier::Distinct) && !is_aggregate {
+        return Err(PlanError::new(
+            "DISTINCT is only supported for aggregate functions",
+        ));
+    }
     if lower == "abs" {
         if args.len() != 1 {
             return Err(PlanError::new("ABS expects 1 argument"));
@@ -551,6 +695,11 @@ fn validate_function_arity(
         if args.len() != 1 {
             return Err(PlanError::new("COUNT expects 1 argument"));
         }
+        if matches!(modifier, FunctionModifier::Distinct)
+            && matches!(args[0], FunctionArgPlan::Star)
+        {
+            return Err(PlanError::new("COUNT DISTINCT does not accept '*'"));
+        }
     } else if lower == "avg" {
         if args.len() != 1 {
             return Err(PlanError::new("AVG expects 1 argument"));
@@ -558,12 +707,40 @@ fn validate_function_arity(
         if matches!(args[0], FunctionArgPlan::Star) {
             return Err(PlanError::new("AVG does not accept '*'"));
         }
+    } else if lower == "sum" {
+        if args.len() != 1 {
+            return Err(PlanError::new("SUM expects 1 argument"));
+        }
+        if matches!(args[0], FunctionArgPlan::Star) {
+            return Err(PlanError::new("SUM does not accept '*'"));
+        }
+    } else if lower == "min" {
+        if args.len() != 1 {
+            return Err(PlanError::new("MIN expects 1 argument"));
+        }
+        if matches!(args[0], FunctionArgPlan::Star) {
+            return Err(PlanError::new("MIN does not accept '*'"));
+        }
+    } else if lower == "max" {
+        if args.len() != 1 {
+            return Err(PlanError::new("MAX expects 1 argument"));
+        }
+        if matches!(args[0], FunctionArgPlan::Star) {
+            return Err(PlanError::new("MAX does not accept '*'"));
+        }
     } else if lower == "coalesce" {
         if args.is_empty() {
             return Err(PlanError::new("COALESCE expects at least 1 argument"));
         }
         if args.iter().any(|arg| matches!(arg, FunctionArgPlan::Star)) {
             return Err(PlanError::new("COALESCE does not accept '*'"));
+        }
+    } else if lower == "nullif" {
+        if args.len() != 2 {
+            return Err(PlanError::new("NULLIF expects 2 arguments"));
+        }
+        if args.iter().any(|arg| matches!(arg, FunctionArgPlan::Star)) {
+            return Err(PlanError::new("NULLIF does not accept '*'"));
         }
     }
     Ok(())
@@ -661,9 +838,14 @@ fn expr_plan_type(expr: &ExprPlan) -> SqlType {
             Value::Boolean(_) => SqlType::Boolean,
             Value::Null => SqlType::Text,
         },
+        ExprPlan::Cast { ty, .. } => match ty {
+            CastType::Signed | CastType::Integer => SqlType::Integer,
+            CastType::Decimal | CastType::Real => SqlType::Real,
+        },
         ExprPlan::Unary { op, expr } => match op {
             UnaryOp::Not => SqlType::Boolean,
             UnaryOp::Neg => expr_plan_type(expr),
+            UnaryOp::Pos => expr_plan_type(expr),
         },
         ExprPlan::Binary { op, left, right } => match op {
             BinaryOp::And
@@ -686,6 +868,7 @@ fn expr_plan_type(expr: &ExprPlan) -> SqlType {
                 }
             }
             BinaryOp::Div => SqlType::Real,
+            BinaryOp::DivInt => SqlType::Integer,
         },
         ExprPlan::Between { .. } => SqlType::Boolean,
         ExprPlan::InList { .. } => SqlType::Boolean,
@@ -704,12 +887,33 @@ fn expr_plan_type(expr: &ExprPlan) -> SqlType {
                 SqlType::Text
             }
         }
-        ExprPlan::Function { name, args } => {
+        ExprPlan::Function {
+            name,
+            modifier: _,
+            args,
+        } => {
             let name = name.to_ascii_lowercase();
             if name == "count" {
                 SqlType::Integer
             } else if name == "avg" {
                 SqlType::Real
+            } else if name == "sum" {
+                let arg_type = args.iter().find_map(|arg| match arg {
+                    FunctionArgPlan::Expr(expr) => Some(expr_plan_type(expr)),
+                    FunctionArgPlan::Star => None,
+                });
+                if matches!(arg_type, Some(SqlType::Real)) {
+                    SqlType::Real
+                } else {
+                    SqlType::Integer
+                }
+            } else if name == "min" || name == "max" {
+                args.iter()
+                    .find_map(|arg| match arg {
+                        FunctionArgPlan::Expr(expr) => Some(expr_plan_type(expr)),
+                        FunctionArgPlan::Star => None,
+                    })
+                    .unwrap_or(SqlType::Text)
             } else if name == "abs" {
                 SqlType::Integer
             } else if name == "coalesce" {
@@ -1157,7 +1361,7 @@ mod tests {
         let catalog = catalog_with_users();
         let expr = planned_projection_expr("SELECT ABS(id) FROM users", &catalog);
         match expr {
-            ExprPlan::Function { name, args } => {
+            ExprPlan::Function { name, args, .. } => {
                 assert_eq!(name.to_ascii_lowercase(), "abs");
                 assert_eq!(args.len(), 1);
             }
@@ -1171,7 +1375,7 @@ mod tests {
         let expr =
             planned_projection_expr("SELECT COALESCE(name, 'n/a') FROM users", &catalog);
         match expr {
-            ExprPlan::Function { name, args } => {
+            ExprPlan::Function { name, args, .. } => {
                 assert_eq!(name.to_ascii_lowercase(), "coalesce");
                 assert_eq!(args.len(), 2);
             }
@@ -1187,6 +1391,59 @@ mod tests {
 
         let scalar = planned_projection_item("SELECT id FROM users", &catalog);
         assert!(!scalar.is_aggregate);
+    }
+
+    #[test]
+    fn planner_plans_group_by_and_having() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse(
+            "SELECT id, COUNT(*) FROM users GROUP BY id HAVING COUNT(*) > 1",
+        )
+        .expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, &catalog).expect("plan");
+        let (having, group_by) = match plan.root {
+            PlanNode::Projection { input, .. } => match *input {
+                PlanNode::Having { predicate, input } => (predicate, input),
+                _ => panic!("expected having"),
+            },
+            _ => panic!("expected projection"),
+        };
+
+        match &having {
+            ExprPlan::Binary { left, .. } => match &**left {
+                ExprPlan::Function { name, .. } => {
+                    assert_eq!(name.to_ascii_lowercase(), "count");
+                }
+                _ => panic!("expected count in having"),
+            },
+            _ => panic!("expected binary having predicate"),
+        }
+
+        match *group_by {
+            PlanNode::GroupBy { keys, aggregates, input } => {
+                assert_eq!(keys.len(), 1);
+                match &keys[0] {
+                    ExprPlan::Column(column) => assert_eq!(column.name, "id"),
+                    _ => panic!("expected column key"),
+                }
+                assert_eq!(aggregates.len(), 1);
+                match &aggregates[0].expr {
+                    ExprPlan::Function { name, .. } => {
+                        assert_eq!(name.to_ascii_lowercase(), "count");
+                    }
+                    _ => panic!("expected count aggregate"),
+                }
+                match *input {
+                    PlanNode::Scan(_) => {}
+                    _ => panic!("expected scan"),
+                }
+            }
+            _ => panic!("expected group by"),
+        }
     }
 
     #[test]

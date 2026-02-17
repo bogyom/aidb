@@ -1,0 +1,14 @@
+name: csv-import-error-policy
+
+description: >
+  Implement error handling policy (stop/continue, error reporting format).
+
+story_points: 3
+
+acceptence_critria:
+  - Stop-on-error and continue modes supported
+  - Error report includes row number and reason
+  - Unit tests cover error policy behavior
+
+deppends_on:
+  - task_00122
