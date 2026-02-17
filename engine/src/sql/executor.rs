@@ -391,6 +391,7 @@ fn numeric_negate(value: Value) -> Result<Value, EngineError> {
     match value {
         Value::Integer(value) => Ok(Value::Integer(-value)),
         Value::Real(value) => Ok(Value::Real(-value)),
+        Value::Null => Ok(Value::Null),
         _ => Err(EngineError::InvalidSql),
     }
 }
@@ -399,6 +400,7 @@ fn numeric_abs(value: Value) -> Result<Value, EngineError> {
     match value {
         Value::Integer(value) => Ok(Value::Integer(value.abs())),
         Value::Real(value) => Ok(Value::Real(value.abs())),
+        Value::Null => Ok(Value::Null),
         _ => Err(EngineError::InvalidSql),
     }
 }
@@ -417,6 +419,7 @@ fn numeric_mul(left: Value, right: Value) -> Result<Value, EngineError> {
 
 fn numeric_div(left: Value, right: Value) -> Result<Value, EngineError> {
     match (left, right) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         (Value::Integer(a), Value::Integer(b)) => {
             if b == 0 {
                 return Err(EngineError::InvalidSql);
@@ -427,9 +430,24 @@ fn numeric_div(left: Value, right: Value) -> Result<Value, EngineError> {
                 Ok(Value::Real(a as f64 / b as f64))
             }
         }
-        (Value::Integer(a), Value::Real(b)) => Ok(Value::Real(a as f64 / b)),
-        (Value::Real(a), Value::Integer(b)) => Ok(Value::Real(a / b as f64)),
-        (Value::Real(a), Value::Real(b)) => Ok(Value::Real(a / b)),
+        (Value::Integer(a), Value::Real(b)) => {
+            if b == 0.0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Real(a as f64 / b))
+        }
+        (Value::Real(a), Value::Integer(b)) => {
+            if b == 0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Real(a / b as f64))
+        }
+        (Value::Real(a), Value::Real(b)) => {
+            if b == 0.0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Real(a / b))
+        }
         _ => Err(EngineError::InvalidSql),
     }
 }
@@ -439,6 +457,7 @@ where
     F: FnOnce(f64, f64) -> f64,
 {
     match (left, right) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         (Value::Integer(a), Value::Integer(b)) => {
             let result = op(a as f64, b as f64);
             if result.fract() == 0.0 {
@@ -719,6 +738,51 @@ mod tests {
         };
         let value = eval_expr(&expr, &row).expect("eval");
         assert_eq!(value, Value::Real(3.5));
+    }
+
+    #[test]
+    fn arithmetic_with_null_returns_null() {
+        let row = vec![];
+        let expr = ExprPlan::Binary {
+            left: Box::new(ExprPlan::Literal(Value::Null)),
+            op: BinaryOp::Add,
+            right: Box::new(ExprPlan::Literal(Value::Integer(1))),
+        };
+        let value = eval_expr(&expr, &row).expect("eval");
+        assert_eq!(value, Value::Null);
+
+        let expr = ExprPlan::Binary {
+            left: Box::new(ExprPlan::Literal(Value::Integer(2))),
+            op: BinaryOp::Mul,
+            right: Box::new(ExprPlan::Literal(Value::Null)),
+        };
+        let value = eval_expr(&expr, &row).expect("eval");
+        assert_eq!(value, Value::Null);
+
+        let expr = ExprPlan::Unary {
+            op: UnaryOp::Neg,
+            expr: Box::new(ExprPlan::Literal(Value::Null)),
+        };
+        let value = eval_expr(&expr, &row).expect("eval");
+        assert_eq!(value, Value::Null);
+    }
+
+    #[test]
+    fn division_by_zero_returns_error() {
+        let row = vec![];
+        let expr = ExprPlan::Binary {
+            left: Box::new(ExprPlan::Literal(Value::Integer(10))),
+            op: BinaryOp::Div,
+            right: Box::new(ExprPlan::Literal(Value::Integer(0))),
+        };
+        assert!(eval_expr(&expr, &row).is_err());
+
+        let expr = ExprPlan::Binary {
+            left: Box::new(ExprPlan::Literal(Value::Real(10.0))),
+            op: BinaryOp::Div,
+            right: Box::new(ExprPlan::Literal(Value::Real(0.0))),
+        };
+        assert!(eval_expr(&expr, &row).is_err());
     }
 
     #[test]

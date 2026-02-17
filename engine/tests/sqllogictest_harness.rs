@@ -42,3 +42,33 @@ fn sqllogictest_runs_select1_file() {
 
     runner.run_file(test_file).expect("run select1 test");
 }
+
+#[test]
+fn sqllogictest_runs_select2_file() {
+    let db_path = temp_db_path();
+    let mut runner = Runner::new(SltDatabase::create(db_path.to_string_lossy().as_ref()).unwrap());
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let test_file = manifest
+        .join("..")
+        .join("tests")
+        .join("sqllogictest")
+        .join("test")
+        .join("select2.test");
+
+    runner.run_file(test_file).expect("run select2 test");
+}
+
+#[test]
+fn sqllogictest_runs_select3_file() {
+    let db_path = temp_db_path();
+    let mut runner = Runner::new(SltDatabase::create(db_path.to_string_lossy().as_ref()).unwrap());
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let test_file = manifest
+        .join("..")
+        .join("tests")
+        .join("sqllogictest")
+        .join("test")
+        .join("select3.test");
+
+    runner.run_file(test_file).expect("run select3 test");
+}

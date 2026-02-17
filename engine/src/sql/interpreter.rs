@@ -348,6 +348,7 @@ fn expr_is_aggregate(expr: &Expr) -> bool {
 fn eval_predicate(expr: &Expr, context: &EvalContext<'_>) -> Result<bool, EngineError> {
     match eval_expr(expr, context)? {
         Value::Boolean(value) => Ok(value),
+        Value::Null => Ok(false),
         _ => Err(EngineError::InvalidSql),
     }
 }
@@ -361,6 +362,7 @@ fn eval_expr(expr: &Expr, context: &EvalContext<'_>) -> Result<Value, EngineErro
             match op {
                 UnaryOp::Not => match value {
                     Value::Boolean(value) => Ok(Value::Boolean(!value)),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(EngineError::InvalidSql),
                 },
                 UnaryOp::Neg => numeric_negate(value),
@@ -385,6 +387,9 @@ fn eval_expr(expr: &Expr, context: &EvalContext<'_>) -> Result<Value, EngineErro
             let value = eval_expr(expr, context)?;
             let low = eval_expr(low, context)?;
             let high = eval_expr(high, context)?;
+            if matches!(value, Value::Null) || matches!(low, Value::Null) || matches!(high, Value::Null) {
+                return Ok(Value::Null);
+            }
             let between = value_cmp(&value, &low) != Ordering::Less
                 && value_cmp(&value, &high) != Ordering::Greater;
             Ok(Value::Boolean(if *negated { !between } else { between }))
@@ -407,6 +412,7 @@ fn eval_expr(expr: &Expr, context: &EvalContext<'_>) -> Result<Value, EngineErro
                     let condition = eval_expr(when_expr, context)?;
                     let is_true = match condition {
                         Value::Boolean(value) => value,
+                        Value::Null => false,
                         _ => return Err(EngineError::InvalidSql),
                     };
                     if is_true {
@@ -433,6 +439,18 @@ fn eval_expr(expr: &Expr, context: &EvalContext<'_>) -> Result<Value, EngineErro
                     }
                     FunctionArg::Star => Err(EngineError::InvalidSql),
                 }
+            } else if name == "coalesce" {
+                for arg in args {
+                    if let FunctionArg::Expr(expr) = arg {
+                        let value = eval_expr(expr, context)?;
+                        if !matches!(value, Value::Null) {
+                            return Ok(value);
+                        }
+                    } else {
+                        return Err(EngineError::InvalidSql);
+                    }
+                }
+                Ok(Value::Null)
             } else if expr_is_aggregate(expr) {
                 Err(EngineError::InvalidSql)
             } else {
@@ -544,22 +562,26 @@ fn column_value(row: RowContext<'_>, column: &str) -> Option<Value> {
 
 fn eval_binary(op: &BinaryOp, left: Value, right: Value) -> Result<Value, EngineError> {
     match op {
-        BinaryOp::Eq => Ok(Value::Boolean(values_equal(&left, &right))),
-        BinaryOp::NotEq => Ok(Value::Boolean(!values_equal(&left, &right))),
-        BinaryOp::Lt => Ok(Value::Boolean(value_cmp(&left, &right) == Ordering::Less)),
-        BinaryOp::Lte => Ok(Value::Boolean(
-            value_cmp(&left, &right) != Ordering::Greater,
-        )),
-        BinaryOp::Gt => Ok(Value::Boolean(value_cmp(&left, &right) == Ordering::Greater)),
-        BinaryOp::Gte => Ok(Value::Boolean(
-            value_cmp(&left, &right) != Ordering::Less,
-        )),
-        BinaryOp::And => Ok(Value::Boolean(
-            value_to_bool(&left)? && value_to_bool(&right)?,
-        )),
-        BinaryOp::Or => Ok(Value::Boolean(
-            value_to_bool(&left)? || value_to_bool(&right)?,
-        )),
+        BinaryOp::Eq => compare_with_nulls(left, right, |l, r| {
+            Value::Boolean(values_equal(&l, &r))
+        }),
+        BinaryOp::NotEq => compare_with_nulls(left, right, |l, r| {
+            Value::Boolean(!values_equal(&l, &r))
+        }),
+        BinaryOp::Lt => compare_with_nulls(left, right, |l, r| {
+            Value::Boolean(value_cmp(&l, &r) == Ordering::Less)
+        }),
+        BinaryOp::Lte => compare_with_nulls(left, right, |l, r| {
+            Value::Boolean(value_cmp(&l, &r) != Ordering::Greater)
+        }),
+        BinaryOp::Gt => compare_with_nulls(left, right, |l, r| {
+            Value::Boolean(value_cmp(&l, &r) == Ordering::Greater)
+        }),
+        BinaryOp::Gte => compare_with_nulls(left, right, |l, r| {
+            Value::Boolean(value_cmp(&l, &r) != Ordering::Less)
+        }),
+        BinaryOp::And => Ok(three_valued_and(left, right)?),
+        BinaryOp::Or => Ok(three_valued_or(left, right)?),
         BinaryOp::Add => numeric_add(left, right),
         BinaryOp::Sub => numeric_sub(left, right),
         BinaryOp::Mul => numeric_mul(left, right),
@@ -571,6 +593,49 @@ fn value_to_bool(value: &Value) -> Result<bool, EngineError> {
     match value {
         Value::Boolean(value) => Ok(*value),
         _ => Err(EngineError::InvalidSql),
+    }
+}
+
+fn compare_with_nulls<F>(left: Value, right: Value, op: F) -> Result<Value, EngineError>
+where
+    F: FnOnce(Value, Value) -> Value,
+{
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        Ok(Value::Null)
+    } else {
+        Ok(op(left, right))
+    }
+}
+
+fn bool_or_null(value: Value) -> Result<Option<bool>, EngineError> {
+    match value {
+        Value::Boolean(value) => Ok(Some(value)),
+        Value::Null => Ok(None),
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
+fn three_valued_and(left: Value, right: Value) -> Result<Value, EngineError> {
+    let left = bool_or_null(left)?;
+    let right = bool_or_null(right)?;
+    if left == Some(false) || right == Some(false) {
+        Ok(Value::Boolean(false))
+    } else if left == Some(true) && right == Some(true) {
+        Ok(Value::Boolean(true))
+    } else {
+        Ok(Value::Null)
+    }
+}
+
+fn three_valued_or(left: Value, right: Value) -> Result<Value, EngineError> {
+    let left = bool_or_null(left)?;
+    let right = bool_or_null(right)?;
+    if left == Some(true) || right == Some(true) {
+        Ok(Value::Boolean(true))
+    } else if left == Some(false) && right == Some(false) {
+        Ok(Value::Boolean(false))
+    } else {
+        Ok(Value::Null)
     }
 }
 
@@ -607,6 +672,7 @@ fn numeric_negate(value: Value) -> Result<Value, EngineError> {
     match value {
         Value::Integer(value) => Ok(Value::Integer(-value)),
         Value::Real(value) => Ok(Value::Real(-value)),
+        Value::Null => Ok(Value::Null),
         _ => Err(EngineError::InvalidSql),
     }
 }
@@ -615,6 +681,7 @@ fn numeric_abs(value: Value) -> Result<Value, EngineError> {
     match value {
         Value::Integer(value) => Ok(Value::Integer(value.abs())),
         Value::Real(value) => Ok(Value::Real(value.abs())),
+        Value::Null => Ok(Value::Null),
         _ => Err(EngineError::InvalidSql),
     }
 }
@@ -633,6 +700,7 @@ fn numeric_mul(left: Value, right: Value) -> Result<Value, EngineError> {
 
 fn numeric_div(left: Value, right: Value) -> Result<Value, EngineError> {
     match (left, right) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         (Value::Integer(a), Value::Integer(b)) => {
             if b == 0 {
                 return Err(EngineError::InvalidSql);
@@ -643,9 +711,24 @@ fn numeric_div(left: Value, right: Value) -> Result<Value, EngineError> {
                 Ok(Value::Real(a as f64 / b as f64))
             }
         }
-        (Value::Integer(a), Value::Real(b)) => Ok(Value::Real(a as f64 / b)),
-        (Value::Real(a), Value::Integer(b)) => Ok(Value::Real(a / b as f64)),
-        (Value::Real(a), Value::Real(b)) => Ok(Value::Real(a / b)),
+        (Value::Integer(a), Value::Real(b)) => {
+            if b == 0.0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Real(a as f64 / b))
+        }
+        (Value::Real(a), Value::Integer(b)) => {
+            if b == 0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Real(a / b as f64))
+        }
+        (Value::Real(a), Value::Real(b)) => {
+            if b == 0.0 {
+                return Err(EngineError::InvalidSql);
+            }
+            Ok(Value::Real(a / b))
+        }
         _ => Err(EngineError::InvalidSql),
     }
 }
@@ -655,6 +738,7 @@ where
     F: FnOnce(f64, f64) -> f64,
 {
     match (left, right) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         (Value::Integer(a), Value::Integer(b)) => {
             let result = op(a as f64, b as f64);
             if result.fract() == 0.0 {
@@ -881,5 +965,98 @@ mod tests {
                 vec![Value::Integer(42)],
             ]
         );
+    }
+
+    #[test]
+    fn arithmetic_with_null_returns_null() {
+        let path = temp_db_path("arithmetic_null");
+        let db = Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        let context = EvalContext {
+            db: &db,
+            current: None,
+            outer: None,
+            subquery_cache: Rc::new(RefCell::new(HashMap::new())),
+            correlation_probe: None,
+        };
+
+        let expr = Expr::Binary {
+            left: Box::new(Expr::Literal(Literal::Null)),
+            op: BinaryOp::Add,
+            right: Box::new(Expr::Literal(Literal::Number("1".to_string()))),
+        };
+        let value = eval_expr(&expr, &context).expect("eval");
+        assert_eq!(value, Value::Null);
+
+        let expr = Expr::Unary {
+            op: UnaryOp::Neg,
+            expr: Box::new(Expr::Literal(Literal::Null)),
+        };
+        let value = eval_expr(&expr, &context).expect("eval");
+        assert_eq!(value, Value::Null);
+    }
+
+    #[test]
+    fn division_by_zero_returns_error() {
+        let path = temp_db_path("division_by_zero");
+        let db = Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        let context = EvalContext {
+            db: &db,
+            current: None,
+            outer: None,
+            subquery_cache: Rc::new(RefCell::new(HashMap::new())),
+            correlation_probe: None,
+        };
+
+        let expr = Expr::Binary {
+            left: Box::new(Expr::Literal(Literal::Number("10".to_string()))),
+            op: BinaryOp::Div,
+            right: Box::new(Expr::Literal(Literal::Number("0".to_string()))),
+        };
+        assert!(eval_expr(&expr, &context).is_err());
+
+        let expr = Expr::Binary {
+            left: Box::new(Expr::Literal(Literal::Number("10.0".to_string()))),
+            op: BinaryOp::Div,
+            right: Box::new(Expr::Literal(Literal::Number("0.0".to_string()))),
+        };
+        assert!(eval_expr(&expr, &context).is_err());
+    }
+
+    #[test]
+    fn comparison_with_null_returns_null() {
+        let path = temp_db_path("comparison_null");
+        let db = Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        let context = EvalContext {
+            db: &db,
+            current: None,
+            outer: None,
+            subquery_cache: Rc::new(RefCell::new(HashMap::new())),
+            correlation_probe: None,
+        };
+
+        let expr = Expr::Binary {
+            left: Box::new(Expr::Literal(Literal::Null)),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(Literal::Number("1".to_string()))),
+        };
+        let value = eval_expr(&expr, &context).expect("eval");
+        assert_eq!(value, Value::Null);
+    }
+
+    #[test]
+    fn predicate_treats_null_as_false() {
+        let path = temp_db_path("predicate_null");
+        let db = Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        let context = EvalContext {
+            db: &db,
+            current: None,
+            outer: None,
+            subquery_cache: Rc::new(RefCell::new(HashMap::new())),
+            correlation_probe: None,
+        };
+
+        let expr = Expr::Literal(Literal::Null);
+        let value = eval_predicate(&expr, &context).expect("eval predicate");
+        assert!(!value);
     }
 }

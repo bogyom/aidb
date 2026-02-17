@@ -61,31 +61,11 @@ impl sqllogictest::DB for SltDatabase {
                 .iter()
                 .map(|col| sql_type_to_column_type(col.sql_type))
                 .collect::<Vec<_>>();
-            let mut rows: Vec<Vec<String>> = result
+            let rows: Vec<Vec<String>> = result
                 .rows
                 .into_iter()
                 .map(|row| row.into_iter().map(value_to_string).collect())
                 .collect();
-            let value_count = rows.len() * types.len();
-            if value_count > HASH_THRESHOLD && !rows.is_empty() {
-                let mut md5 = md5::Context::new();
-                for line in &rows {
-                    for value in line {
-                        md5.consume(value.as_bytes());
-                        md5.consume(b"\n");
-                    }
-                }
-                let hash = md5.compute();
-                rows = vec![vec![format!(
-                    "{} values hashing to {:?}",
-                    value_count, hash
-                )]];
-            } else {
-                rows = rows
-                    .into_iter()
-                    .flat_map(|row| row.into_iter().map(|value| vec![value]))
-                    .collect();
-            }
             return Ok(DBOutput::Rows { types, rows });
         }
 
@@ -96,8 +76,6 @@ impl sqllogictest::DB for SltDatabase {
         "aidb"
     }
 }
-
-const HASH_THRESHOLD: usize = 8;
 
 fn sql_type_to_column_type(sql_type: crate::SqlType) -> ColumnType {
     match sql_type {

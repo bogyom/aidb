@@ -1,0 +1,33 @@
+name: sqllogictest-select3
+description: >
+  Run and pass select3.test in sqllogictest.
+
+story_points: 3
+
+acceptence_critria:
+  - sqllogictest harness runs select3.test
+  - select3.test passes
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00032
+  - task_00033
+  - task_00034
+  - task_00035
+  - task_00036
+  - task_00037
+  - task_00038
+  - task_00039
+  - task_00040
+  - task_00041
+  - task_00042
+  - task_00043
+  - task_00044
+  - task_00045
+  - task_00046
+  - task_00047
+  - task_00048
+  - task_00049
+  - task_00050
+  - task_00051
+  - task_00052

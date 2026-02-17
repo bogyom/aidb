@@ -5,3 +5,6 @@ members = [
   "cli",
 ]
 resolver = "2"
+
+[patch.crates-io]
+sqllogictest = { path = "vendor/sqllogictest" }

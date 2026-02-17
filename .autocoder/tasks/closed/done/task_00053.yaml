@@ -1,13 +1,12 @@
-name: sqllogictest-select2-select3
+name: sqllogictest-select2
 description: >
-  Run and pass select2.test and select3.test in sqllogictest.
+  Run and pass select2.test in sqllogictest.
 
-story_points: 5
+story_points: 3
 
 acceptence_critria:
   - sqllogictest harness runs select2.test
-  - sqllogictest harness runs select3.test
-  - Both files pass
+  - select2.test passes
 
   - Unit tests added for this task
 deppends_on:
