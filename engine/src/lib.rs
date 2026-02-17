@@ -1,10 +1,13 @@
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
+use std::sync::RwLock;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 mod catalog;
 mod record;
 mod slt;
+mod sql;
 
 pub use catalog::{Catalog, ColumnSchema, SqlType, TableSchema};
 pub use record::{RowRecord, Value};
@@ -27,9 +30,24 @@ pub struct HeapRowLocation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnMeta {
+    pub name: String,
+    pub sql_type: SqlType,
+}
+
+impl ColumnMeta {
+    pub fn new(name: impl Into<String>, sql_type: SqlType) -> Self {
+        Self {
+            name: name.into(),
+            sql_type,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct QueryResult {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    pub columns: Vec<ColumnMeta>,
+    pub rows: Vec<Vec<Value>>,
 }
 
 impl QueryResult {
@@ -38,6 +56,38 @@ impl QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
         }
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        let columns = self
+            .columns
+            .iter()
+            .map(|col| {
+                serde_json::json!({
+                    "name": col.name,
+                    "type": format!("{:?}", col.sql_type),
+                })
+            })
+            .collect::<Vec<_>>();
+        let rows = self
+            .rows
+            .iter()
+            .map(|row| row.iter().map(value_to_json).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "columns": columns,
+            "rows": rows,
+        })
+    }
+}
+
+fn value_to_json(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Integer(value) => serde_json::json!(value),
+        Value::Real(value) => serde_json::json!(value),
+        Value::Text(value) => serde_json::json!(value),
+        Value::Boolean(value) => serde_json::json!(value),
     }
 }
 
@@ -187,6 +237,11 @@ pub struct Database {
     path: String,
     closed: bool,
     catalog: Catalog,
+    table_pages: HashMap<String, Vec<u32>>,
+    /// Concurrency policy: single writer, multiple readers. Writers block readers.
+    /// Methods requiring `&mut self` are already exclusive via Rust borrowing, while
+    /// shared (`&self`) operations take this lock to coordinate readers and writers.
+    concurrency: RwLock<()>,
 }
 
 impl Database {
@@ -202,10 +257,16 @@ impl Database {
         } else {
             read_catalog_from_file(&mut file, header.catalog_root)?
         };
+        let mut table_pages = HashMap::new();
+        for table in catalog.tables() {
+            table_pages.insert(table.name.clone(), Vec::new());
+        }
         Ok(Self {
             path,
             closed: false,
             catalog,
+            table_pages,
+            concurrency: RwLock::new(()),
         })
     }
 
@@ -219,22 +280,72 @@ impl Database {
             path,
             closed: false,
             catalog: Catalog::new(),
+            table_pages: HashMap::new(),
+            concurrency: RwLock::new(()),
         };
-        db.initialize_catalog()?;
+        db.initialize_catalog_unlocked()?;
         Ok(db)
     }
 
-    pub fn execute(&self, sql: &str) -> EngineResult<QueryResult> {
+    fn read_guard(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        self.concurrency.read().expect("concurrency lock")
+    }
+
+    fn write_guard(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
+        self.concurrency.write().expect("concurrency lock")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_guard_for_test(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
+        self.write_guard()
+    }
+
+    pub fn execute(&mut self, sql: &str) -> EngineResult<QueryResult> {
+        self.execute_unlocked(sql)
+    }
+
+    fn execute_unlocked(&mut self, sql: &str) -> EngineResult<QueryResult> {
         if self.closed {
             return Err(EngineError::Closed);
         }
         if sql.trim().is_empty() {
             return Err(EngineError::InvalidSql);
         }
-        Ok(QueryResult::empty())
+        let statements = crate::sql::parser::parse(sql).map_err(|_| EngineError::InvalidSql)?;
+        let mut last_result = QueryResult::empty();
+        for statement in &statements {
+            crate::sql::validator::validate_statement(statement, &self.catalog)
+                .map_err(map_validation_error)?;
+            match statement {
+                crate::sql::parser::Statement::CreateTable(create) => {
+                    let table = table_from_ast(create)?;
+                    self.create_table_unlocked(table)?;
+                }
+                crate::sql::parser::Statement::DropTable(drop) => {
+                    self.drop_table_unlocked(&drop.name)?;
+                }
+                crate::sql::parser::Statement::Insert(insert) => {
+                    let row = row_from_insert(insert, &self.catalog)?;
+                    self.insert_table_row_unlocked(&insert.table, &row)?;
+                }
+                crate::sql::parser::Statement::Select(_) => {
+                    let plan = crate::sql::planner::plan_statement(statement, &self.catalog)
+                        .map_err(|_| EngineError::InvalidSql)?
+                        .ok_or(EngineError::InvalidSql)?;
+                    let result =
+                        crate::sql::executor::execute_plan(&plan.root, self)?;
+                    last_result = crate::sql::executor::to_query_result(result);
+                }
+            }
+        }
+        Ok(last_result)
     }
 
     pub fn close(mut self) -> EngineResult<()> {
+        self.close_unlocked()
+    }
+
+    fn close_unlocked(&mut self) -> EngineResult<()> {
         if self.closed {
             return Err(EngineError::Closed);
         }
@@ -250,28 +361,69 @@ impl Database {
         &self.catalog
     }
 
+    fn table_pages_unlocked(&self, table: &str) -> Option<&[u32]> {
+        self.table_pages.get(table).map(|pages| pages.as_slice())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn scan_table_rows(&self, table: &str) -> EngineResult<Vec<RowRecord>> {
+        let _guard = self.read_guard();
+        self.scan_table_rows_unlocked(table)
+    }
+
+    pub(crate) fn scan_table_rows_unlocked(&self, table: &str) -> EngineResult<Vec<RowRecord>> {
+        let pages = match self.table_pages_unlocked(table) {
+            Some(pages) => pages,
+            None => return Ok(Vec::new()),
+        };
+        let mut rows = Vec::new();
+        for page_id in pages {
+            let page_rows = self.scan_heap_page_unlocked(*page_id)?;
+            rows.extend(page_rows);
+        }
+        Ok(rows)
+    }
+
     pub fn create_table(&mut self, table: TableSchema) -> EngineResult<()> {
+        self.create_table_unlocked(table)
+    }
+
+    fn create_table_unlocked(&mut self, table: TableSchema) -> EngineResult<()> {
         if self.closed {
             return Err(EngineError::Closed);
         }
         if self.catalog.table(&table.name).is_some() {
             return Err(EngineError::TableAlreadyExists);
         }
+        let table_name = table.name.clone();
         self.catalog.add_table(table);
-        self.persist_catalog()
+        self.persist_catalog_unlocked()?;
+        self.table_pages.entry(table_name).or_default();
+        Ok(())
     }
 
     pub fn drop_table(&mut self, name: &str) -> EngineResult<()> {
+        self.drop_table_unlocked(name)
+    }
+
+    fn drop_table_unlocked(&mut self, name: &str) -> EngineResult<()> {
         if self.closed {
             return Err(EngineError::Closed);
         }
         if self.catalog.remove_table(name).is_none() {
             return Err(EngineError::TableNotFound);
         }
-        self.persist_catalog()
+        self.persist_catalog_unlocked()?;
+        self.table_pages.remove(name);
+        Ok(())
     }
 
     pub fn allocate_page(&self, page_type: PageType) -> EngineResult<u32> {
+        let _guard = self.write_guard();
+        self.allocate_page_unlocked(page_type)
+    }
+
+    fn allocate_page_unlocked(&self, page_type: PageType) -> EngineResult<u32> {
         if self.closed {
             return Err(EngineError::Closed);
         }
@@ -296,6 +448,11 @@ impl Database {
     }
 
     pub fn free_page(&self, page_id: u32) -> EngineResult<()> {
+        let _guard = self.write_guard();
+        self.free_page_unlocked(page_id)
+    }
+
+    fn free_page_unlocked(&self, page_id: u32) -> EngineResult<()> {
         if self.closed {
             return Err(EngineError::Closed);
         }
@@ -320,6 +477,11 @@ impl Database {
     }
 
     pub fn read_page_header(&self, page_id: u32) -> EngineResult<PageHeader> {
+        let _guard = self.read_guard();
+        self.read_page_header_unlocked(page_id)
+    }
+
+    fn read_page_header_unlocked(&self, page_id: u32) -> EngineResult<PageHeader> {
         if self.closed {
             return Err(EngineError::Closed);
         }
@@ -332,6 +494,11 @@ impl Database {
     }
 
     pub fn insert_heap_row(&self, row: &RowRecord) -> EngineResult<HeapRowLocation> {
+        let _guard = self.write_guard();
+        self.insert_heap_row_unlocked(row)
+    }
+
+    fn insert_heap_row_unlocked(&self, row: &RowRecord) -> EngineResult<HeapRowLocation> {
         if self.closed {
             return Err(EngineError::Closed);
         }
@@ -366,7 +533,7 @@ impl Database {
         }
         drop(file);
 
-        let page_id = self.allocate_page(PageType::Heap)?;
+        let page_id = self.allocate_page_unlocked(PageType::Heap)?;
         let mut file = open_rw(&self.path)?;
         write_page_payload_at(&mut file, page_id, 0, &row_bytes)?;
         let mut header = read_page_header(&mut file, page_id)?;
@@ -375,7 +542,63 @@ impl Database {
         Ok(HeapRowLocation { page_id, offset: 0 })
     }
 
+    pub fn insert_table_row(&mut self, table: &str, row: &RowRecord) -> EngineResult<()> {
+        self.insert_table_row_unlocked(table, row)
+    }
+
+    fn insert_table_row_unlocked(&mut self, table: &str, row: &RowRecord) -> EngineResult<()> {
+        if self.closed {
+            return Err(EngineError::Closed);
+        }
+        if self.catalog.table(table).is_none() {
+            return Err(EngineError::TableNotFound);
+        }
+        let row_bytes = row.encode()?;
+        if row_bytes.len() > PAGE_PAYLOAD_SIZE {
+            return Err(EngineError::RowTooLarge);
+        }
+
+        {
+            let pages = self.table_pages.entry(table.to_string()).or_default();
+            let mut file = open_rw(&self.path)?;
+            for page_id in pages.iter() {
+                let header = read_page_header(&mut file, *page_id)?;
+                if header.page_type != PageType::Heap {
+                    return Err(EngineError::InvalidPageHeader);
+                }
+                let used = header.payload_size as usize;
+                if used > PAGE_PAYLOAD_SIZE {
+                    return Err(EngineError::InvalidPageHeader);
+                }
+                let free = PAGE_PAYLOAD_SIZE - used;
+                if row_bytes.len() <= free {
+                    let offset = used;
+                    write_page_payload_at(&mut file, *page_id, offset, &row_bytes)?;
+                    let mut updated = header;
+                    updated.payload_size = (used + row_bytes.len()) as u32;
+                    write_page_header(&mut file, *page_id, updated)?;
+                    return Ok(());
+                }
+            }
+        }
+
+        let page_id = self.allocate_page_unlocked(PageType::Heap)?;
+        let mut file = open_rw(&self.path)?;
+        write_page_payload_at(&mut file, page_id, 0, &row_bytes)?;
+        let mut header = read_page_header(&mut file, page_id)?;
+        header.payload_size = row_bytes.len() as u32;
+        write_page_header(&mut file, page_id, header)?;
+        let pages = self.table_pages.entry(table.to_string()).or_default();
+        pages.push(page_id);
+        Ok(())
+    }
+
     pub fn read_heap_row(&self, location: HeapRowLocation) -> EngineResult<RowRecord> {
+        let _guard = self.read_guard();
+        self.read_heap_row_unlocked(location)
+    }
+
+    fn read_heap_row_unlocked(&self, location: HeapRowLocation) -> EngineResult<RowRecord> {
         if self.closed {
             return Err(EngineError::Closed);
         }
@@ -403,6 +626,11 @@ impl Database {
     }
 
     pub fn scan_heap_page(&self, page_id: u32) -> EngineResult<Vec<RowRecord>> {
+        let _guard = self.read_guard();
+        self.scan_heap_page_unlocked(page_id)
+    }
+
+    fn scan_heap_page_unlocked(&self, page_id: u32) -> EngineResult<Vec<RowRecord>> {
         if self.closed {
             return Err(EngineError::Closed);
         }
@@ -443,8 +671,8 @@ impl Database {
         Ok(rows)
     }
 
-    fn initialize_catalog(&mut self) -> EngineResult<()> {
-        let page_id = self.allocate_page(PageType::Catalog)?;
+    fn initialize_catalog_unlocked(&mut self) -> EngineResult<()> {
+        let page_id = self.allocate_page_unlocked(PageType::Catalog)?;
         let mut file = open_rw(&self.path)?;
         let mut header = read_file_header(&mut file)?;
         header.catalog_root = page_id;
@@ -453,12 +681,12 @@ impl Database {
         Ok(())
     }
 
-    fn persist_catalog(&self) -> EngineResult<()> {
+    fn persist_catalog_unlocked(&self) -> EngineResult<()> {
         let mut file = open_rw(&self.path)?;
         let header = read_file_header(&mut file)?;
         let page_id = if header.catalog_root == NO_PAGE {
             drop(file);
-            let page_id = self.allocate_page(PageType::Catalog)?;
+            let page_id = self.allocate_page_unlocked(PageType::Catalog)?;
             let mut file = open_rw(&self.path)?;
             let mut header = read_file_header(&mut file)?;
             header.catalog_root = page_id;
@@ -473,9 +701,101 @@ impl Database {
     }
 }
 
+fn table_from_ast(create: &crate::sql::parser::CreateTable) -> EngineResult<TableSchema> {
+    let mut columns = Vec::with_capacity(create.columns.len());
+    let mut primary_key = None;
+
+    for column in &create.columns {
+        let sql_type = match column.data_type {
+            crate::sql::parser::TypeName::Integer => SqlType::Integer,
+            crate::sql::parser::TypeName::Real => SqlType::Real,
+            crate::sql::parser::TypeName::Text => SqlType::Text,
+            crate::sql::parser::TypeName::Boolean => SqlType::Boolean,
+        };
+        let nullable = !column.primary_key;
+        columns.push(ColumnSchema::new(&column.name, sql_type, nullable));
+        if column.primary_key {
+            if primary_key.replace(column.name.clone()).is_some() {
+                return Err(EngineError::InvalidSql);
+            }
+        }
+    }
+
+    let mut table = TableSchema::new(&create.name, columns);
+    if let Some(primary_key) = primary_key {
+        table = table.with_primary_key(primary_key);
+    }
+    Ok(table)
+}
+
+fn row_from_insert(
+    insert: &crate::sql::parser::Insert,
+    catalog: &Catalog,
+) -> EngineResult<RowRecord> {
+    let table = catalog
+        .table(&insert.table)
+        .ok_or(EngineError::InvalidSql)?;
+    let mut values = vec![Value::Null; table.columns.len()];
+
+    let column_names: Vec<String> = if let Some(columns) = &insert.columns {
+        columns.clone()
+    } else {
+        table.columns.iter().map(|col| col.name.clone()).collect()
+    };
+
+    if column_names.len() != insert.values.len() {
+        return Err(EngineError::InvalidSql);
+    }
+
+    for (name, expr) in column_names.iter().zip(insert.values.iter()) {
+        let index = table
+            .columns
+            .iter()
+            .position(|column| column.name == *name)
+            .ok_or(EngineError::InvalidSql)?;
+        values[index] = expr_to_value(expr)?;
+    }
+
+    Ok(RowRecord::new(values))
+}
+
+fn expr_to_value(expr: &crate::sql::parser::Expr) -> EngineResult<Value> {
+    match expr {
+        crate::sql::parser::Expr::Literal(literal) => literal_to_value(literal),
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
+fn literal_to_value(literal: &crate::sql::lexer::Literal) -> EngineResult<Value> {
+    match literal {
+        crate::sql::lexer::Literal::Number(raw) => {
+            if raw.contains('.') {
+                let value = raw.parse::<f64>().map_err(|_| EngineError::InvalidSql)?;
+                Ok(Value::Real(value))
+            } else {
+                let value = raw.parse::<i64>().map_err(|_| EngineError::InvalidSql)?;
+                Ok(Value::Integer(value))
+            }
+        }
+        crate::sql::lexer::Literal::String(value) => Ok(Value::Text(value.clone())),
+        crate::sql::lexer::Literal::Boolean(value) => Ok(Value::Boolean(*value)),
+        crate::sql::lexer::Literal::Null => Ok(Value::Null),
+    }
+}
+
 impl Drop for Database {
     fn drop(&mut self) {
         self.closed = true;
+    }
+}
+
+fn map_validation_error(error: crate::sql::validator::ValidationError) -> EngineError {
+    match error {
+        crate::sql::validator::ValidationError::TableNotFound(_) => EngineError::TableNotFound,
+        crate::sql::validator::ValidationError::TableAlreadyExists(_) => {
+            EngineError::TableAlreadyExists
+        }
+        _ => EngineError::InvalidSql,
     }
 }
 
@@ -831,9 +1151,154 @@ mod tests {
     #[test]
     fn execute_rejects_empty_sql() {
         let path = temp_db_path("execute_empty_sql");
-        let db = Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
         let err = db.execute("   ").unwrap_err();
         assert_eq!(err, EngineError::InvalidSql);
+    }
+
+    #[test]
+    fn execute_select_with_filter_order_limit() {
+        let path = temp_db_path("execute_select_filter_order_limit");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER, name TEXT)")
+            .expect("create table");
+        db.execute("INSERT INTO users (id, name) VALUES (2, 'Bob')")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id, name) VALUES (1, 'Ada')")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id, name) VALUES (3, 'Cal')")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT name FROM users WHERE id = 1 OR id = 3 ORDER BY id DESC LIMIT 1",
+            )
+            .expect("select");
+
+        assert_eq!(
+            result.columns,
+            vec![ColumnMeta::new("name", SqlType::Text)]
+        );
+        assert_eq!(result.rows, vec![vec![Value::Text("Cal".to_string())]]);
+    }
+
+    #[test]
+    fn execute_select_scans_multiple_heap_pages() {
+        let path = temp_db_path("execute_select_scan_multiple_pages");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE t (id INTEGER, name TEXT)")
+            .expect("create table");
+
+        let large_len = PAGE_PAYLOAD_SIZE - 40;
+        let large_text = "x".repeat(large_len);
+        let sql = format!("INSERT INTO t (id, name) VALUES (1, '{}')", large_text);
+        db.execute(&sql).expect("insert large row");
+        db.execute("INSERT INTO t (id, name) VALUES (2, 'small')")
+            .expect("insert second row");
+
+        let result = db
+            .execute("SELECT id FROM t WHERE id = 2 ORDER BY id ASC")
+            .expect("select");
+
+        assert_eq!(result.rows, vec![vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn execute_insert_rejects_unknown_table() {
+        let path = temp_db_path("execute_insert_unknown_table");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        let err = db
+            .execute("INSERT INTO missing (id) VALUES (1)")
+            .unwrap_err();
+        assert_eq!(err, EngineError::TableNotFound);
+    }
+
+    #[test]
+    fn execute_insert_rejects_unknown_column() {
+        let path = temp_db_path("execute_insert_unknown_column");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER)")
+            .expect("create table");
+        let err = db
+            .execute("INSERT INTO users (missing) VALUES (1)")
+            .unwrap_err();
+        assert_eq!(err, EngineError::InvalidSql);
+    }
+
+    #[test]
+    fn execute_insert_defaults_null_for_missing_columns() {
+        let path = temp_db_path("execute_insert_defaults_null");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER, name TEXT)")
+            .expect("create table");
+        db.execute("INSERT INTO users (id) VALUES (1)")
+            .expect("insert row");
+        let result = db
+            .execute("SELECT name FROM users WHERE id = 1")
+            .expect("select");
+        assert_eq!(result.rows, vec![vec![Value::Null]]);
+    }
+
+    #[test]
+    fn query_result_to_json_includes_types() {
+        let result = QueryResult {
+            columns: vec![ColumnMeta::new("id", SqlType::Integer)],
+            rows: vec![vec![Value::Integer(7)]],
+        };
+        let json = result.to_json();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "columns": [{ "name": "id", "type": "Integer" }],
+                "rows": [[7]],
+            })
+        );
+    }
+
+    #[test]
+    fn concurrency_blocks_reads_during_writes() {
+        use std::sync::{mpsc, Arc};
+        use std::thread;
+        use std::time::Duration;
+
+        let path = temp_db_path("concurrency_blocks_reads");
+        let db = Arc::new(Database::create(path.to_string_lossy().as_ref()).expect("create"));
+        let page_id = db
+            .allocate_page(PageType::Heap)
+            .expect("allocate page");
+
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (read_done_tx, read_done_rx) = mpsc::channel();
+
+        let db_writer = Arc::clone(&db);
+        let writer = thread::spawn(move || {
+            let _guard = db_writer.write_guard_for_test();
+            locked_tx.send(()).expect("signal locked");
+            thread::sleep(Duration::from_millis(200));
+        });
+
+        let db_reader = Arc::clone(&db);
+        let reader = thread::spawn(move || {
+            locked_rx.recv().expect("wait for lock");
+            db_reader
+                .read_page_header(page_id)
+                .expect("read header");
+            read_done_tx.send(()).expect("signal read done");
+        });
+
+        assert!(read_done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        read_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("read completes after write");
+
+        writer.join().expect("writer join");
+        reader.join().expect("reader join");
     }
 
     #[test]
