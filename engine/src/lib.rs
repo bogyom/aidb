@@ -329,12 +329,11 @@ impl Database {
                     self.insert_table_row_unlocked(&insert.table, &row)?;
                 }
                 crate::sql::parser::Statement::Select(_) => {
-                    let plan = crate::sql::planner::plan_statement(statement, &self.catalog)
-                        .map_err(|_| EngineError::InvalidSql)?
-                        .ok_or(EngineError::InvalidSql)?;
-                    let result =
-                        crate::sql::executor::execute_plan(&plan.root, self)?;
-                    last_result = crate::sql::executor::to_query_result(result);
+                    let select = match statement {
+                        crate::sql::parser::Statement::Select(select) => select,
+                        _ => unreachable!("select statement"),
+                    };
+                    last_result = crate::sql::interpreter::execute_select(select, self)?;
                 }
             }
         }

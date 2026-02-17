@@ -44,10 +44,16 @@ pub struct Insert {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Select {
     pub items: Vec<SelectItem>,
-    pub from: Option<String>,
+    pub from: Option<FromClause>,
     pub filter: Option<Expr>,
-    pub order_by: Option<OrderBy>,
+    pub order_by: Vec<OrderBy>,
     pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FromClause {
+    pub table: String,
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,18 +80,48 @@ pub enum Expr {
     Literal(Literal),
     Unary { op: UnaryOp, expr: Box<Expr> },
     Binary { left: Box<Expr>, op: BinaryOp, right: Box<Expr> },
+    Between {
+        expr: Box<Expr>,
+        low: Box<Expr>,
+        high: Box<Expr>,
+        negated: bool,
+    },
+    Case {
+        operand: Option<Box<Expr>>,
+        when_thens: Vec<(Expr, Expr)>,
+        else_expr: Option<Box<Expr>>,
+    },
+    Function { name: String, args: Vec<FunctionArg> },
+    Subquery(Box<Select>),
+    Exists(Box<Select>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnaryOp {
     Not,
+    Neg,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryOp {
     Eq,
+    NotEq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Add,
+    Sub,
+    Mul,
+    Div,
     And,
     Or,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FunctionArg {
+    Expr(Expr),
+    Star,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,6 +259,10 @@ fn parse_insert(stream: &mut TokenStream) -> Result<Insert, ParseError> {
 }
 
 fn parse_select(stream: &mut TokenStream) -> Result<Select, ParseError> {
+    parse_select_body(stream)
+}
+
+fn parse_select_body(stream: &mut TokenStream) -> Result<Select, ParseError> {
     let mut items = Vec::new();
 
     if stream.consume_symbol(Symbol::Star) {
@@ -243,7 +283,15 @@ fn parse_select(stream: &mut TokenStream) -> Result<Select, ParseError> {
     }
 
     let from = if stream.consume_keyword(Keyword::From) {
-        Some(stream.expect_identifier()?)
+        let table = stream.expect_identifier()?;
+        let alias = if stream.consume_keyword(Keyword::As) {
+            Some(stream.expect_identifier()?)
+        } else if let Some(alias) = stream.consume_identifier() {
+            Some(alias)
+        } else {
+            None
+        };
+        Some(FromClause { table, alias })
     } else {
         None
     };
@@ -254,20 +302,25 @@ fn parse_select(stream: &mut TokenStream) -> Result<Select, ParseError> {
         None
     };
 
-    let order_by = if stream.consume_keyword(Keyword::Order) {
+    let mut order_by = Vec::new();
+    if stream.consume_keyword(Keyword::Order) {
         stream.expect_keyword(Keyword::By)?;
-        let expr = parse_expr(stream)?;
-        let direction = if stream.consume_keyword(Keyword::Asc) {
-            OrderDirection::Asc
-        } else if stream.consume_keyword(Keyword::Desc) {
-            OrderDirection::Desc
-        } else {
-            OrderDirection::Asc
-        };
-        Some(OrderBy { expr, direction })
-    } else {
-        None
-    };
+        loop {
+            let expr = parse_expr(stream)?;
+            let direction = if stream.consume_keyword(Keyword::Asc) {
+                OrderDirection::Asc
+            } else if stream.consume_keyword(Keyword::Desc) {
+                OrderDirection::Desc
+            } else {
+                OrderDirection::Asc
+            };
+            order_by.push(OrderBy { expr, direction });
+            if stream.consume_symbol(Symbol::Comma) {
+                continue;
+            }
+            break;
+        }
+    }
 
     let limit = if stream.consume_keyword(Keyword::Limit) {
         let literal = stream.expect_literal()?;
@@ -360,23 +413,133 @@ fn parse_not(stream: &mut TokenStream) -> Result<Expr, ParseError> {
 }
 
 fn parse_comparison(stream: &mut TokenStream) -> Result<Expr, ParseError> {
-    let mut expr = parse_primary(stream)?;
-    if stream.consume_symbol(Symbol::Equal) {
-        let right = parse_primary(stream)?;
-        expr = Expr::Binary {
-            left: Box::new(expr),
-            op: BinaryOp::Eq,
-            right: Box::new(right),
+    let expr = parse_additive(stream)?;
+
+    let negated = if stream.consume_keyword(Keyword::Not) {
+        stream.expect_keyword(Keyword::Between)?;
+        true
+    } else if stream.consume_keyword(Keyword::Between) {
+        false
+    } else {
+        let op = if stream.consume_symbol(Symbol::Equal) {
+            Some(BinaryOp::Eq)
+        } else if stream.consume_symbol(Symbol::NotEqual) {
+            Some(BinaryOp::NotEq)
+        } else if stream.consume_symbol(Symbol::LessEqual) {
+            Some(BinaryOp::Lte)
+        } else if stream.consume_symbol(Symbol::GreaterEqual) {
+            Some(BinaryOp::Gte)
+        } else if stream.consume_symbol(Symbol::Less) {
+            Some(BinaryOp::Lt)
+        } else if stream.consume_symbol(Symbol::Greater) {
+            Some(BinaryOp::Gt)
+        } else {
+            None
         };
+
+        if let Some(op) = op {
+            let right = parse_additive(stream)?;
+            return Ok(Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            });
+        }
+        return Ok(expr);
+    };
+
+    let low = parse_additive(stream)?;
+    stream.expect_keyword(Keyword::And)?;
+    let high = parse_additive(stream)?;
+    Ok(Expr::Between {
+        expr: Box::new(expr),
+        low: Box::new(low),
+        high: Box::new(high),
+        negated,
+    })
+}
+
+fn parse_additive(stream: &mut TokenStream) -> Result<Expr, ParseError> {
+    let mut expr = parse_multiplicative(stream)?;
+    loop {
+        if stream.consume_symbol(Symbol::Plus) {
+            let right = parse_multiplicative(stream)?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::Add,
+                right: Box::new(right),
+            };
+        } else if stream.consume_symbol(Symbol::Minus) {
+            let right = parse_multiplicative(stream)?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::Sub,
+                right: Box::new(right),
+            };
+        } else {
+            break;
+        }
     }
     Ok(expr)
 }
 
+fn parse_multiplicative(stream: &mut TokenStream) -> Result<Expr, ParseError> {
+    let mut expr = parse_unary(stream)?;
+    loop {
+        if stream.consume_symbol(Symbol::Star) {
+            let right = parse_unary(stream)?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::Mul,
+                right: Box::new(right),
+            };
+        } else if stream.consume_symbol(Symbol::Slash) {
+            let right = parse_unary(stream)?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::Div,
+                right: Box::new(right),
+            };
+        } else {
+            break;
+        }
+    }
+    Ok(expr)
+}
+
+fn parse_unary(stream: &mut TokenStream) -> Result<Expr, ParseError> {
+    if stream.consume_symbol(Symbol::Minus) {
+        let expr = parse_unary(stream)?;
+        return Ok(Expr::Unary {
+            op: UnaryOp::Neg,
+            expr: Box::new(expr),
+        });
+    }
+    parse_primary(stream)
+}
+
 fn parse_primary(stream: &mut TokenStream) -> Result<Expr, ParseError> {
     if stream.consume_symbol(Symbol::LParen) {
+        if stream.consume_keyword(Keyword::Select) {
+            let select = parse_select_body(stream)?;
+            stream.expect_symbol(Symbol::RParen)?;
+            return Ok(Expr::Subquery(Box::new(select)));
+        }
         let expr = parse_expr(stream)?;
         stream.expect_symbol(Symbol::RParen)?;
         return Ok(expr);
+    }
+
+    if stream.consume_keyword(Keyword::Exists) {
+        stream.expect_symbol(Symbol::LParen)?;
+        stream.expect_keyword(Keyword::Select)?;
+        let select = parse_select_body(stream)?;
+        stream.expect_symbol(Symbol::RParen)?;
+        return Ok(Expr::Exists(Box::new(select)));
+    }
+
+    if stream.consume_keyword(Keyword::Case) {
+        return parse_case(stream);
     }
 
     if let Some(literal) = stream.consume_literal() {
@@ -384,6 +547,15 @@ fn parse_primary(stream: &mut TokenStream) -> Result<Expr, ParseError> {
     }
 
     if let Some(identifier) = stream.consume_identifier() {
+        if stream.consume_symbol(Symbol::LParen) {
+            let args = parse_function_args(stream)?;
+            stream.expect_symbol(Symbol::RParen)?;
+            return Ok(Expr::Function {
+                name: identifier,
+                args,
+            });
+        }
+
         let mut parts = vec![identifier];
         while stream.consume_symbol(Symbol::Dot) {
             parts.push(stream.expect_identifier()?);
@@ -392,6 +564,63 @@ fn parse_primary(stream: &mut TokenStream) -> Result<Expr, ParseError> {
     }
 
     Err(stream.error("expected expression", None))
+}
+
+fn parse_function_args(stream: &mut TokenStream) -> Result<Vec<FunctionArg>, ParseError> {
+    let mut args = Vec::new();
+    let checkpoint = stream.position();
+    if stream.consume_symbol(Symbol::RParen) {
+        stream.reset(checkpoint);
+        return Ok(args);
+    }
+
+    if stream.consume_symbol(Symbol::Star) {
+        args.push(FunctionArg::Star);
+    } else {
+        args.push(FunctionArg::Expr(parse_expr(stream)?));
+        while stream.consume_symbol(Symbol::Comma) {
+            args.push(FunctionArg::Expr(parse_expr(stream)?));
+        }
+    }
+    Ok(args)
+}
+
+fn parse_case(stream: &mut TokenStream) -> Result<Expr, ParseError> {
+    let checkpoint = stream.position();
+    let operand = if stream.consume_keyword(Keyword::When) {
+        stream.reset(checkpoint);
+        None
+    } else {
+        Some(Box::new(parse_expr(stream)?))
+    };
+
+    let mut when_thens = Vec::new();
+    loop {
+        stream.expect_keyword(Keyword::When)?;
+        let when_expr = parse_expr(stream)?;
+        stream.expect_keyword(Keyword::Then)?;
+        let then_expr = parse_expr(stream)?;
+        when_thens.push((when_expr, then_expr));
+        let checkpoint = stream.position();
+        if stream.consume_keyword(Keyword::When) {
+            stream.reset(checkpoint);
+            continue;
+        }
+        break;
+    }
+
+    let else_expr = if stream.consume_keyword(Keyword::Else) {
+        Some(Box::new(parse_expr(stream)?))
+    } else {
+        None
+    };
+    stream.expect_keyword(Keyword::End)?;
+
+    Ok(Expr::Case {
+        operand,
+        when_thens,
+        else_expr,
+    })
 }
 
 struct TokenStream {
@@ -548,9 +777,15 @@ mod tests {
         match &statements[0] {
             Statement::Select(stmt) => {
                 assert_eq!(stmt.items.len(), 2);
-                assert_eq!(stmt.from.as_deref(), Some("users"));
+                assert_eq!(
+                    stmt.from.as_ref().map(|from| from.table.as_str()),
+                    Some("users")
+                );
                 assert!(stmt.filter.is_some());
-                assert!(matches!(stmt.order_by.as_ref().unwrap().direction, OrderDirection::Desc));
+                assert!(matches!(
+                    stmt.order_by.first().unwrap().direction,
+                    OrderDirection::Desc
+                ));
                 assert_eq!(stmt.limit, Some(10));
             }
             _ => panic!("expected select"),

@@ -90,7 +90,7 @@ pub fn plan_select(select: &Select, catalog: &Catalog) -> Result<Plan, PlanError
     let table = select
         .from
         .as_ref()
-        .and_then(|name| catalog.table(name));
+        .and_then(|from| catalog.table(&from.table));
 
     let input = if let Some(table) = table {
         PlanNode::Scan(TableScan {
@@ -111,7 +111,7 @@ pub fn plan_select(select: &Select, catalog: &Catalog) -> Result<Plan, PlanError
         };
     }
 
-    if let Some(order_by) = &select.order_by {
+    if let Some(order_by) = select.order_by.first() {
         let expr = plan_expr(&order_by.expr, table)?;
         node = PlanNode::Order {
             by: OrderByPlan {
@@ -233,6 +233,7 @@ fn plan_expr(expr: &AstExpr, table: Option<&TableSchema>) -> Result<ExprPlan, Pl
             let expr = plan_expr(expr, table)?;
             let op = match op {
                 AstUnaryOp::Not => UnaryOp::Not,
+                _ => return Err(PlanError::new("unsupported unary operator")),
             };
             Ok(ExprPlan::Unary {
                 op,
@@ -246,6 +247,7 @@ fn plan_expr(expr: &AstExpr, table: Option<&TableSchema>) -> Result<ExprPlan, Pl
                 AstBinaryOp::Eq => BinaryOp::Eq,
                 AstBinaryOp::And => BinaryOp::And,
                 AstBinaryOp::Or => BinaryOp::Or,
+                _ => return Err(PlanError::new("unsupported binary operator")),
             };
             Ok(ExprPlan::Binary {
                 left: Box::new(left),
@@ -253,6 +255,7 @@ fn plan_expr(expr: &AstExpr, table: Option<&TableSchema>) -> Result<ExprPlan, Pl
                 right: Box::new(right),
             })
         }
+        _ => Err(PlanError::new("unsupported expression")),
     }
 }
 

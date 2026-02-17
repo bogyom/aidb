@@ -1,4 +1,4 @@
-use super::parser::{ColumnDef, Expr, OrderBy, Select, SelectItem, Statement};
+use super::parser::{ColumnDef, Expr, FunctionArg, OrderBy, Select, SelectItem, Statement};
 use crate::Catalog;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,13 +133,16 @@ fn validate_insert(
 }
 
 fn validate_select(select: &Select, catalog: &Catalog) -> Result<(), ValidationError> {
-    let table = match &select.from {
-        Some(name) => Some(
-            catalog
-                .table(name)
-                .ok_or_else(|| ValidationError::TableNotFound(name.clone()))?,
+    let (table, alias) = match &select.from {
+        Some(from) => (
+            Some(
+                catalog
+                    .table(&from.table)
+                    .ok_or_else(|| ValidationError::TableNotFound(from.table.clone()))?,
+            ),
+            from.alias.as_deref(),
         ),
-        None => None,
+        None => (None, None),
     };
 
     for item in &select.items {
@@ -161,16 +164,16 @@ fn validate_select(select: &Select, catalog: &Catalog) -> Result<(), ValidationE
                     ));
                 }
             }
-            SelectItem::Expr(expr) => validate_expr(expr, table)?,
+            SelectItem::Expr(expr) => validate_expr(expr, table, alias)?,
         }
     }
 
     if let Some(filter) = &select.filter {
-        validate_expr(filter, table)?;
+        validate_expr(filter, table, alias)?;
     }
 
-    if let Some(OrderBy { expr, direction: _ }) = &select.order_by {
-        validate_expr(expr, table)?;
+    for OrderBy { expr, direction: _ } in &select.order_by {
+        validate_expr(expr, table, alias)?;
     }
 
     Ok(())
@@ -179,21 +182,60 @@ fn validate_select(select: &Select, catalog: &Catalog) -> Result<(), ValidationE
 fn validate_expr(
     expr: &Expr,
     table: Option<&crate::TableSchema>,
+    alias: Option<&str>,
 ) -> Result<(), ValidationError> {
     match expr {
-        Expr::Identifier(parts) => validate_identifier(parts, table),
+        Expr::Identifier(parts) => validate_identifier(parts, table, alias),
         Expr::Literal(_) => Ok(()),
-        Expr::Unary { expr, .. } => validate_expr(expr, table),
+        Expr::Unary { expr, .. } => validate_expr(expr, table, alias),
         Expr::Binary { left, right, .. } => {
-            validate_expr(left, table)?;
-            validate_expr(right, table)
+            validate_expr(left, table, alias)?;
+            validate_expr(right, table, alias)
         }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            ..
+        } => {
+            validate_expr(expr, table, alias)?;
+            validate_expr(low, table, alias)?;
+            validate_expr(high, table, alias)
+        }
+        Expr::Case {
+            operand,
+            when_thens,
+            else_expr,
+        } => {
+            if let Some(operand) = operand {
+                validate_expr(operand, table, alias)?;
+            }
+            for (when_expr, then_expr) in when_thens {
+                validate_expr(when_expr, table, alias)?;
+                validate_expr(then_expr, table, alias)?;
+            }
+            if let Some(else_expr) = else_expr {
+                validate_expr(else_expr, table, alias)?;
+            }
+            Ok(())
+        }
+        Expr::Function { args, .. } => {
+            for arg in args {
+                match arg {
+                    FunctionArg::Expr(expr) => validate_expr(expr, table, alias)?,
+                    FunctionArg::Star => {}
+                }
+            }
+            Ok(())
+        }
+        Expr::Subquery(_) | Expr::Exists(_) => Ok(()),
     }
 }
 
 fn validate_identifier(
     parts: &[String],
     table: Option<&crate::TableSchema>,
+    alias: Option<&str>,
 ) -> Result<(), ValidationError> {
     let table = table.ok_or_else(|| {
         ValidationError::unsupported("column reference requires FROM clause")
@@ -210,7 +252,7 @@ fn validate_identifier(
             Ok(())
         }
         [table_name, column] => {
-            if table_name != &table.name {
+            if table_name != &table.name && Some(table_name.as_str()) != alias {
                 return Err(ValidationError::unsupported(
                     "qualified column does not match FROM table",
                 ));
@@ -237,6 +279,31 @@ fn expr_contains_identifier(expr: &Expr) -> bool {
         Expr::Binary { left, right, .. } => {
             expr_contains_identifier(left) || expr_contains_identifier(right)
         }
+        Expr::Between { expr, low, high, .. } => {
+            expr_contains_identifier(expr)
+                || expr_contains_identifier(low)
+                || expr_contains_identifier(high)
+        }
+        Expr::Case {
+            operand,
+            when_thens,
+            else_expr,
+        } => {
+            operand
+                .as_ref()
+                .map_or(false, |expr| expr_contains_identifier(expr))
+                || when_thens.iter().any(|(when, then)| {
+                    expr_contains_identifier(when) || expr_contains_identifier(then)
+                })
+                || else_expr
+                    .as_ref()
+                    .map_or(false, |expr| expr_contains_identifier(expr))
+        }
+        Expr::Function { args, .. } => args.iter().any(|arg| match arg {
+            FunctionArg::Expr(expr) => expr_contains_identifier(expr),
+            FunctionArg::Star => false,
+        }),
+        Expr::Subquery(_) | Expr::Exists(_) => true,
     }
 }
 
@@ -244,6 +311,7 @@ fn expr_contains_identifier(expr: &Expr) -> bool {
 mod tests {
     use super::*;
     use crate::{Catalog, ColumnSchema, SqlType, TableSchema};
+    use crate::sql::parser;
     use super::super::parser::{
         BinaryOp, CreateTable, DropTable, Expr, Insert, Select, SelectItem, Statement, TypeName,
     };
@@ -268,9 +336,12 @@ mod tests {
         let catalog = Catalog::new();
         let stmt = Statement::Select(Select {
             items: vec![SelectItem::Wildcard(None)],
-            from: Some("users".to_string()),
+            from: Some(parser::FromClause {
+                table: "users".to_string(),
+                alias: None,
+            }),
             filter: None,
-            order_by: None,
+            order_by: Vec::new(),
             limit: None,
         });
         let err = validate_statement(&stmt, &catalog).expect_err("error");
@@ -284,9 +355,12 @@ mod tests {
             items: vec![SelectItem::Expr(Expr::Identifier(vec![
                 "age".to_string(),
             ]))],
-            from: Some("users".to_string()),
+            from: Some(parser::FromClause {
+                table: "users".to_string(),
+                alias: None,
+            }),
             filter: None,
-            order_by: None,
+            order_by: Vec::new(),
             limit: None,
         });
         let err = validate_statement(&stmt, &catalog).expect_err("error");
@@ -326,7 +400,7 @@ mod tests {
             ]))],
             from: None,
             filter: None,
-            order_by: None,
+            order_by: Vec::new(),
             limit: None,
         });
         let err = validate_statement(&stmt, &catalog).expect_err("error");
@@ -350,7 +424,7 @@ mod tests {
                     "1".to_string(),
                 ))),
             }),
-            order_by: None,
+            order_by: Vec::new(),
             limit: None,
         });
         validate_statement(&stmt, &catalog).expect("valid");

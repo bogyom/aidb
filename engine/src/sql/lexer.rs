@@ -38,6 +38,14 @@ pub enum Keyword {
     And,
     Or,
     Not,
+    Between,
+    Case,
+    When,
+    Then,
+    Else,
+    End,
+    Exists,
+    As,
     Order,
     By,
     Limit,
@@ -61,6 +69,14 @@ pub enum Symbol {
     Semicolon,
     Star,
     Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Plus,
+    Minus,
+    Slash,
     Dot,
 }
 
@@ -117,6 +133,114 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
             },
             '=' => Token {
                 kind: TokenKind::Symbol(Symbol::Equal),
+                span: Span {
+                    start: index,
+                    end: index + ch.len_utf8(),
+                },
+            },
+            '!' => {
+                if let Some((i, next)) = chars.peek().copied() {
+                    if next == '=' {
+                        chars.next();
+                        Token {
+                            kind: TokenKind::Symbol(Symbol::NotEqual),
+                            span: Span {
+                                start: index,
+                                end: i + next.len_utf8(),
+                            },
+                        }
+                    } else {
+                        return Err(LexError::UnexpectedChar { ch, index });
+                    }
+                } else {
+                    return Err(LexError::UnexpectedChar { ch, index });
+                }
+            }
+            '<' => {
+                if let Some((i, next)) = chars.peek().copied() {
+                    if next == '=' {
+                        chars.next();
+                        Token {
+                            kind: TokenKind::Symbol(Symbol::LessEqual),
+                            span: Span {
+                                start: index,
+                                end: i + next.len_utf8(),
+                            },
+                        }
+                    } else if next == '>' {
+                        chars.next();
+                        Token {
+                            kind: TokenKind::Symbol(Symbol::NotEqual),
+                            span: Span {
+                                start: index,
+                                end: i + next.len_utf8(),
+                            },
+                        }
+                    } else {
+                        Token {
+                            kind: TokenKind::Symbol(Symbol::Less),
+                            span: Span {
+                                start: index,
+                                end: index + ch.len_utf8(),
+                            },
+                        }
+                    }
+                } else {
+                    Token {
+                        kind: TokenKind::Symbol(Symbol::Less),
+                        span: Span {
+                            start: index,
+                            end: index + ch.len_utf8(),
+                        },
+                    }
+                }
+            }
+            '>' => {
+                if let Some((i, next)) = chars.peek().copied() {
+                    if next == '=' {
+                        chars.next();
+                        Token {
+                            kind: TokenKind::Symbol(Symbol::GreaterEqual),
+                            span: Span {
+                                start: index,
+                                end: i + next.len_utf8(),
+                            },
+                        }
+                    } else {
+                        Token {
+                            kind: TokenKind::Symbol(Symbol::Greater),
+                            span: Span {
+                                start: index,
+                                end: index + ch.len_utf8(),
+                            },
+                        }
+                    }
+                } else {
+                    Token {
+                        kind: TokenKind::Symbol(Symbol::Greater),
+                        span: Span {
+                            start: index,
+                            end: index + ch.len_utf8(),
+                        },
+                    }
+                }
+            }
+            '+' => Token {
+                kind: TokenKind::Symbol(Symbol::Plus),
+                span: Span {
+                    start: index,
+                    end: index + ch.len_utf8(),
+                },
+            },
+            '-' => Token {
+                kind: TokenKind::Symbol(Symbol::Minus),
+                span: Span {
+                    start: index,
+                    end: index + ch.len_utf8(),
+                },
+            },
+            '/' => Token {
+                kind: TokenKind::Symbol(Symbol::Slash),
                 span: Span {
                     start: index,
                     end: index + ch.len_utf8(),
@@ -262,6 +386,14 @@ fn keyword_or_literal(ident: &str) -> KeywordOrLiteral {
         "AND" => KeywordOrLiteral::Keyword(Keyword::And),
         "OR" => KeywordOrLiteral::Keyword(Keyword::Or),
         "NOT" => KeywordOrLiteral::Keyword(Keyword::Not),
+        "BETWEEN" => KeywordOrLiteral::Keyword(Keyword::Between),
+        "CASE" => KeywordOrLiteral::Keyword(Keyword::Case),
+        "WHEN" => KeywordOrLiteral::Keyword(Keyword::When),
+        "THEN" => KeywordOrLiteral::Keyword(Keyword::Then),
+        "ELSE" => KeywordOrLiteral::Keyword(Keyword::Else),
+        "END" => KeywordOrLiteral::Keyword(Keyword::End),
+        "EXISTS" => KeywordOrLiteral::Keyword(Keyword::Exists),
+        "AS" => KeywordOrLiteral::Keyword(Keyword::As),
         "ORDER" => KeywordOrLiteral::Keyword(Keyword::Order),
         "BY" => KeywordOrLiteral::Keyword(Keyword::By),
         "LIMIT" => KeywordOrLiteral::Keyword(Keyword::Limit),

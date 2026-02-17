@@ -70,6 +70,8 @@ async fn handle_request(
 ) -> Result<Response<Body>, Infallible> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/health") => Ok(Response::new(Body::from("ok"))),
+        (&Method::GET, "/openapi.json") => json_ok(openapi_spec()),
+        (&Method::GET, "/docs") => Ok(swagger_ui_response()),
         (&Method::POST, "/execute") => handle_execute(req, state).await,
         _ => {
             let mut response = Response::new(Body::from("not found"));
@@ -77,6 +79,174 @@ async fn handle_request(
             Ok(response)
         }
     }
+}
+
+fn swagger_ui_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        .body(Body::from(swagger_ui_html()))
+        .unwrap()
+}
+
+fn swagger_ui_html() -> String {
+    r##"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AIDB API Docs</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+    <style>
+      body { margin: 0; background: #f5f5f5; }
+    </style>
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+      window.onload = function () {
+        window.ui = SwaggerUIBundle({
+          url: "/openapi.json",
+          dom_id: "#swagger-ui",
+          presets: [
+            SwaggerUIBundle.presets.apis,
+            SwaggerUIBundle.SwaggerUIStandalonePreset
+          ],
+          tryItOutEnabled: true,
+        });
+      };
+    </script>
+  </body>
+</html>"##
+        .to_string()
+}
+
+fn openapi_spec() -> serde_json::Value {
+    serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {
+            "title": "AIDB API",
+            "version": "1.0.0"
+        },
+        "paths": {
+            "/execute": {
+                "post": {
+                    "summary": "Execute SQL",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/ExecuteRequest" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Query result",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ExecuteResponse" }
+                                }
+                            }
+                        },
+                        "400": {
+                            "description": "Invalid request",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                                }
+                            }
+                        },
+                        "404": {
+                            "description": "Not found",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                                }
+                            }
+                        },
+                        "409": {
+                            "description": "Conflict",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                                }
+                            }
+                        },
+                        "500": {
+                            "description": "Server error",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "ExecuteRequest": {
+                    "type": "object",
+                    "required": ["sql"],
+                    "properties": {
+                        "sql": { "type": "string" }
+                    }
+                },
+                "ExecuteResponse": {
+                    "type": "object",
+                    "required": ["columns", "rows"],
+                    "properties": {
+                        "columns": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/Column" }
+                        },
+                        "rows": {
+                            "type": "array",
+                            "items": {
+                                "type": "array",
+                                "items": { "$ref": "#/components/schemas/Value" }
+                            }
+                        }
+                    }
+                },
+                "Column": {
+                    "type": "object",
+                    "required": ["name", "type"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "type": { "type": "string" }
+                    }
+                },
+                "Value": {
+                    "oneOf": [
+                        { "type": "integer" },
+                        { "type": "number" },
+                        { "type": "string" },
+                        { "type": "boolean" }
+                    ],
+                    "nullable": true
+                },
+                "ErrorBody": {
+                    "type": "object",
+                    "required": ["code", "message"],
+                    "properties": {
+                        "code": { "type": "string" },
+                        "message": { "type": "string" }
+                    }
+                },
+                "ErrorResponse": {
+                    "type": "object",
+                    "required": ["error"],
+                    "properties": {
+                        "error": { "$ref": "#/components/schemas/ErrorBody" }
+                    }
+                }
+            }
+        }
+    })
 }
 
 async fn handle_execute(
@@ -276,6 +446,54 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[tokio::test]
+    async fn openapi_endpoint_includes_execute_and_error_schema() {
+        let state = AppState {
+            db: Arc::new(Mutex::new(
+                Database::create(temp_db_path("openapi").to_string_lossy().as_ref()).unwrap(),
+            )),
+        };
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/openapi.json")
+            .body(Body::empty())
+            .unwrap();
+        let response = handle_request(req, state).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body()).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["openapi"], "3.0.3");
+        assert!(json.pointer("/paths/~1execute/post/requestBody").is_some());
+        assert!(json.pointer("/paths/~1execute/post/responses/200").is_some());
+        assert!(json.pointer("/components/schemas/ErrorResponse").is_some());
+    }
+
+    #[tokio::test]
+    async fn docs_endpoint_serves_swagger_ui() {
+        let state = AppState {
+            db: Arc::new(Mutex::new(
+                Database::create(temp_db_path("docs").to_string_lossy().as_ref()).unwrap(),
+            )),
+        };
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/docs")
+            .body(Body::empty())
+            .unwrap();
+        let response = handle_request(req, state).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        assert!(content_type.starts_with("text/html"));
+        let body = to_bytes(response.into_body()).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("SwaggerUIBundle"));
+        assert!(html.contains("/openapi.json"));
     }
 
     #[test]
