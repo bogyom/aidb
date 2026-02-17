@@ -1,0 +1,13 @@
+name: planner-in-not-in
+description: >
+  Plan IN/NOT IN expressions into executable expression nodes with correct semantics hooks.
+
+story_points: 3
+
+acceptence_critria:
+  - Planner converts IN/NOT IN AST nodes into executable expressions
+  - Planner preserves NULL-sensitive semantics for IN/NOT IN
+  - Unit tests added for this task
+deppends_on:
+  - task_00033
+  - task_00055

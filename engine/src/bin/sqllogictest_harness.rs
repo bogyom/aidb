@@ -30,9 +30,17 @@ fn run() -> Result<(), String> {
         return Err(format!("no .test files found under {}", path.display()));
     }
     for file in files {
+        if is_select4_test(&file) {
+            runner.db_mut().clear_timings();
+        }
         runner
-            .run_file(file)
+            .run_file(&file)
             .map_err(|err| err.display(false).to_string())?;
+        if is_select4_test(&file) {
+            runner
+                .db_mut()
+                .emit_slowest_summary("select4.test", 10);
+        }
     }
     Ok(())
 }
@@ -58,4 +66,11 @@ fn visit_dir(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), std::io::Error
         }
     }
     Ok(())
+}
+
+fn is_select4_test(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("select4.test")
+    )
 }

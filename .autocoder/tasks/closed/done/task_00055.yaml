@@ -1,0 +1,14 @@
+name: parser-in-not-in
+description: >
+  Add SQL lexer keywords and parser AST support for IN/NOT IN list predicates.
+
+story_points: 3
+
+acceptence_critria:
+  - Lexer recognizes IN keyword (and NOT when used as IN negation)
+  - Parser builds AST nodes for IN and NOT IN with expression lists
+  - IN list supports multiple scalar expressions
+  - Unit tests added for this task
+deppends_on:
+  - task_00012
+  - task_00013

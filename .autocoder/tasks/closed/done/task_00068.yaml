@@ -1,0 +1,14 @@
+name: predicate-conjunct-split
+
+description: >
+  Implement a predicate collector that splits WHERE into AND-conjuncts.
+
+story_points: 2
+
+acceptence_critria:
+  - Collector returns a flat list of AND-conjuncts
+  - Non-AND predicates are preserved as single items
+  - Unit tests added for this task
+
+deppends_on:
+  - task_00063

@@ -29,17 +29,21 @@ pub enum Keyword {
     Create,
     Drop,
     Table,
+    Index,
+    On,
     Primary,
     Key,
     Integer,
     Real,
     Text,
     Boolean,
+    Varchar,
     And,
     Or,
     Not,
     Is,
     Between,
+    In,
     Case,
     When,
     Then,
@@ -52,6 +56,10 @@ pub enum Keyword {
     Limit,
     Asc,
     Desc,
+    Union,
+    All,
+    Intersect,
+    Except,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,17 +386,21 @@ fn keyword_or_literal(ident: &str) -> KeywordOrLiteral {
         "CREATE" => KeywordOrLiteral::Keyword(Keyword::Create),
         "DROP" => KeywordOrLiteral::Keyword(Keyword::Drop),
         "TABLE" => KeywordOrLiteral::Keyword(Keyword::Table),
+        "INDEX" => KeywordOrLiteral::Keyword(Keyword::Index),
+        "ON" => KeywordOrLiteral::Keyword(Keyword::On),
         "PRIMARY" => KeywordOrLiteral::Keyword(Keyword::Primary),
         "KEY" => KeywordOrLiteral::Keyword(Keyword::Key),
         "INTEGER" => KeywordOrLiteral::Keyword(Keyword::Integer),
         "REAL" => KeywordOrLiteral::Keyword(Keyword::Real),
         "TEXT" => KeywordOrLiteral::Keyword(Keyword::Text),
         "BOOLEAN" => KeywordOrLiteral::Keyword(Keyword::Boolean),
+        "VARCHAR" => KeywordOrLiteral::Keyword(Keyword::Varchar),
         "AND" => KeywordOrLiteral::Keyword(Keyword::And),
         "OR" => KeywordOrLiteral::Keyword(Keyword::Or),
         "NOT" => KeywordOrLiteral::Keyword(Keyword::Not),
         "IS" => KeywordOrLiteral::Keyword(Keyword::Is),
         "BETWEEN" => KeywordOrLiteral::Keyword(Keyword::Between),
+        "IN" => KeywordOrLiteral::Keyword(Keyword::In),
         "CASE" => KeywordOrLiteral::Keyword(Keyword::Case),
         "WHEN" => KeywordOrLiteral::Keyword(Keyword::When),
         "THEN" => KeywordOrLiteral::Keyword(Keyword::Then),
@@ -401,6 +413,10 @@ fn keyword_or_literal(ident: &str) -> KeywordOrLiteral {
         "LIMIT" => KeywordOrLiteral::Keyword(Keyword::Limit),
         "ASC" => KeywordOrLiteral::Keyword(Keyword::Asc),
         "DESC" => KeywordOrLiteral::Keyword(Keyword::Desc),
+        "UNION" => KeywordOrLiteral::Keyword(Keyword::Union),
+        "ALL" => KeywordOrLiteral::Keyword(Keyword::All),
+        "INTERSECT" => KeywordOrLiteral::Keyword(Keyword::Intersect),
+        "EXCEPT" => KeywordOrLiteral::Keyword(Keyword::Except),
         "TRUE" => KeywordOrLiteral::Literal(Literal::Boolean(true)),
         "FALSE" => KeywordOrLiteral::Literal(Literal::Boolean(false)),
         "NULL" => KeywordOrLiteral::Literal(Literal::Null),
@@ -462,6 +478,57 @@ mod tests {
             TokenKind::Identifier("col".to_string()),
             TokenKind::Keyword(Keyword::Is),
             TokenKind::Literal(Literal::Null),
+        ];
+
+        assert_eq!(kinds(&tokens), expected);
+    }
+
+    #[test]
+    fn lexes_in_keyword() {
+        let tokens = lex("id IN (1, 2)").expect("lex");
+        let expected = vec![
+            TokenKind::Identifier("id".to_string()),
+            TokenKind::Keyword(Keyword::In),
+            TokenKind::Symbol(Symbol::LParen),
+            TokenKind::Literal(Literal::Number("1".to_string())),
+            TokenKind::Symbol(Symbol::Comma),
+            TokenKind::Literal(Literal::Number("2".to_string())),
+            TokenKind::Symbol(Symbol::RParen),
+        ];
+
+        assert_eq!(kinds(&tokens), expected);
+    }
+
+    #[test]
+    fn lexes_set_operation_keywords() {
+        let tokens = lex("SELECT 1 UNION ALL SELECT 2 INTERSECT SELECT 3 EXCEPT SELECT 4")
+            .expect("lex");
+        let expected = vec![
+            TokenKind::Keyword(Keyword::Select),
+            TokenKind::Literal(Literal::Number("1".to_string())),
+            TokenKind::Keyword(Keyword::Union),
+            TokenKind::Keyword(Keyword::All),
+            TokenKind::Keyword(Keyword::Select),
+            TokenKind::Literal(Literal::Number("2".to_string())),
+            TokenKind::Keyword(Keyword::Intersect),
+            TokenKind::Keyword(Keyword::Select),
+            TokenKind::Literal(Literal::Number("3".to_string())),
+            TokenKind::Keyword(Keyword::Except),
+            TokenKind::Keyword(Keyword::Select),
+            TokenKind::Literal(Literal::Number("4".to_string())),
+        ];
+
+        assert_eq!(kinds(&tokens), expected);
+    }
+
+    #[test]
+    fn lexes_varchar_keyword() {
+        let tokens = lex("VARCHAR(30)").expect("lex");
+        let expected = vec![
+            TokenKind::Keyword(Keyword::Varchar),
+            TokenKind::Symbol(Symbol::LParen),
+            TokenKind::Literal(Literal::Number("30".to_string())),
+            TokenKind::Symbol(Symbol::RParen),
         ];
 
         assert_eq!(kinds(&tokens), expected);

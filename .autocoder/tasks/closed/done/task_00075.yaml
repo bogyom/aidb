@@ -1,0 +1,14 @@
+name: exists-early-exit-join
+
+description: >
+  Preserve early-exit semantics for EXISTS during join execution.
+
+story_points: 2
+
+acceptence_critria:
+  - EXISTS returns immediately on first matching row
+  - Behavior matches pre-join results
+  - Unit tests added for this task
+
+deppends_on:
+  - task_00073

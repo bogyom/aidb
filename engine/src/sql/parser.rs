@@ -3,15 +3,30 @@ use super::lexer::{lex, Keyword, LexError, Literal, Symbol, Token, TokenKind};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     CreateTable(CreateTable),
+    CreateIndex(CreateIndex),
     DropTable(DropTable),
     Insert(Insert),
     Select(Select),
+    SetOperation(SetExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTable {
     pub name: String,
     pub columns: Vec<ColumnDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateIndex {
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<IndexColumn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexColumn {
+    pub name: String,
+    pub direction: Option<OrderDirection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,10 +59,28 @@ pub struct Insert {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Select {
     pub items: Vec<SelectItem>,
-    pub from: Option<FromClause>,
+    pub from: Vec<FromClause>,
     pub filter: Option<Expr>,
     pub order_by: Vec<OrderBy>,
     pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetExpr {
+    Select(Select),
+    SetOp {
+        left: Box<SetExpr>,
+        op: SetOp,
+        right: Box<SetExpr>,
+        all: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOp {
+    Union,
+    Intersect,
+    Except,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +114,11 @@ pub enum Expr {
     Unary { op: UnaryOp, expr: Box<Expr> },
     Binary { left: Box<Expr>, op: BinaryOp, right: Box<Expr> },
     IsNull { expr: Box<Expr>, negated: bool },
+    InList {
+        expr: Box<Expr>,
+        list: Vec<Expr>,
+        negated: bool,
+    },
     Between {
         expr: Box<Expr>,
         low: Box<Expr>,
@@ -172,13 +210,34 @@ pub fn parse(sql: &str) -> Result<Vec<Statement>, ParseError> {
 
 fn parse_statement(stream: &mut TokenStream) -> Result<Statement, ParseError> {
     if stream.consume_keyword(Keyword::Create) {
-        parse_create_table(stream).map(Statement::CreateTable)
+        if matches!(
+            stream.peek(),
+            Some(Token {
+                kind: TokenKind::Keyword(Keyword::Table),
+                ..
+            })
+        ) {
+            parse_create_table(stream).map(Statement::CreateTable)
+        } else if matches!(
+            stream.peek(),
+            Some(Token {
+                kind: TokenKind::Keyword(Keyword::Index),
+                ..
+            })
+        ) {
+            parse_create_index(stream).map(Statement::CreateIndex)
+        } else {
+            Err(stream.error("expected CREATE TABLE or CREATE INDEX", None))
+        }
     } else if stream.consume_keyword(Keyword::Drop) {
         parse_drop_table(stream).map(Statement::DropTable)
     } else if stream.consume_keyword(Keyword::Insert) {
         parse_insert(stream).map(Statement::Insert)
     } else if stream.consume_keyword(Keyword::Select) {
-        parse_select(stream).map(Statement::Select)
+        parse_set_expr(stream).map(|expr| match expr {
+            SetExpr::Select(select) => Statement::Select(select),
+            other => Statement::SetOperation(other),
+        })
     } else {
         Err(stream.error("expected statement", None))
     }
@@ -213,6 +272,41 @@ fn parse_create_table(stream: &mut TokenStream) -> Result<CreateTable, ParseErro
     stream.expect_symbol(Symbol::RParen)?;
 
     Ok(CreateTable { name, columns })
+}
+
+fn parse_create_index(stream: &mut TokenStream) -> Result<CreateIndex, ParseError> {
+    stream.expect_keyword(Keyword::Index)?;
+    let name = stream.expect_identifier()?;
+    stream.expect_keyword(Keyword::On)?;
+    let table = stream.expect_identifier()?;
+    stream.expect_symbol(Symbol::LParen)?;
+
+    let mut columns = Vec::new();
+    loop {
+        let column = stream.expect_identifier()?;
+        let direction = if stream.consume_keyword(Keyword::Asc) {
+            Some(OrderDirection::Asc)
+        } else if stream.consume_keyword(Keyword::Desc) {
+            Some(OrderDirection::Desc)
+        } else {
+            None
+        };
+        columns.push(IndexColumn {
+            name: column,
+            direction,
+        });
+        if stream.consume_symbol(Symbol::Comma) {
+            continue;
+        }
+        break;
+    }
+    stream.expect_symbol(Symbol::RParen)?;
+
+    Ok(CreateIndex {
+        name,
+        table,
+        columns,
+    })
 }
 
 fn parse_drop_table(stream: &mut TokenStream) -> Result<DropTable, ParseError> {
@@ -283,19 +377,24 @@ fn parse_select_body(stream: &mut TokenStream) -> Result<Select, ParseError> {
         }
     }
 
-    let from = if stream.consume_keyword(Keyword::From) {
-        let table = stream.expect_identifier()?;
-        let alias = if stream.consume_keyword(Keyword::As) {
-            Some(stream.expect_identifier()?)
-        } else if let Some(alias) = stream.consume_identifier() {
-            Some(alias)
-        } else {
-            None
-        };
-        Some(FromClause { table, alias })
-    } else {
-        None
-    };
+    let mut from = Vec::new();
+    if stream.consume_keyword(Keyword::From) {
+        loop {
+            let table = stream.expect_identifier()?;
+            let alias = if stream.consume_keyword(Keyword::As) {
+                Some(stream.expect_identifier()?)
+            } else if let Some(alias) = stream.consume_identifier() {
+                Some(alias)
+            } else {
+                None
+            };
+            from.push(FromClause { table, alias });
+            if stream.consume_symbol(Symbol::Comma) {
+                continue;
+            }
+            break;
+        }
+    }
 
     let filter = if stream.consume_keyword(Keyword::Where) {
         Some(parse_expr(stream)?)
@@ -344,6 +443,34 @@ fn parse_select_body(stream: &mut TokenStream) -> Result<Select, ParseError> {
     })
 }
 
+fn parse_set_expr(stream: &mut TokenStream) -> Result<SetExpr, ParseError> {
+    let mut expr = SetExpr::Select(parse_select_body(stream)?);
+
+    loop {
+        let (op, all) = if stream.consume_keyword(Keyword::Union) {
+            let all = stream.consume_keyword(Keyword::All);
+            (SetOp::Union, all)
+        } else if stream.consume_keyword(Keyword::Intersect) {
+            (SetOp::Intersect, false)
+        } else if stream.consume_keyword(Keyword::Except) {
+            (SetOp::Except, false)
+        } else {
+            break;
+        };
+
+        stream.expect_keyword(Keyword::Select)?;
+        let right = SetExpr::Select(parse_select_body(stream)?);
+        expr = SetExpr::SetOp {
+            left: Box::new(expr),
+            op,
+            right: Box::new(right),
+            all,
+        };
+    }
+
+    Ok(expr)
+}
+
 fn parse_qualified_wildcard(stream: &mut TokenStream) -> Result<Option<String>, ParseError> {
     let checkpoint = stream.position();
     if let Some(name) = stream.consume_identifier() {
@@ -366,6 +493,15 @@ fn parse_type_name(stream: &mut TokenStream) -> Result<TypeName, ParseError> {
         Ok(TypeName::Text)
     } else if stream.consume_keyword(Keyword::Boolean) {
         Ok(TypeName::Boolean)
+    } else if stream.consume_keyword(Keyword::Varchar) {
+        if stream.consume_symbol(Symbol::LParen) {
+            let literal = stream.expect_literal()?;
+            if !matches!(literal, Literal::Number(_)) {
+                return Err(stream.error("expected numeric length", stream.last_span_start()));
+            }
+            stream.expect_symbol(Symbol::RParen)?;
+        }
+        Ok(TypeName::Text)
     } else {
         Err(stream.error("expected type name", None))
     }
@@ -428,48 +564,90 @@ fn parse_comparison(stream: &mut TokenStream) -> Result<Expr, ParseError> {
         });
     }
 
-    let negated = if stream.consume_keyword(Keyword::Not) {
-        stream.expect_keyword(Keyword::Between)?;
-        true
-    } else if stream.consume_keyword(Keyword::Between) {
-        false
-    } else {
-        let op = if stream.consume_symbol(Symbol::Equal) {
-            Some(BinaryOp::Eq)
-        } else if stream.consume_symbol(Symbol::NotEqual) {
-            Some(BinaryOp::NotEq)
-        } else if stream.consume_symbol(Symbol::LessEqual) {
-            Some(BinaryOp::Lte)
-        } else if stream.consume_symbol(Symbol::GreaterEqual) {
-            Some(BinaryOp::Gte)
-        } else if stream.consume_symbol(Symbol::Less) {
-            Some(BinaryOp::Lt)
-        } else if stream.consume_symbol(Symbol::Greater) {
-            Some(BinaryOp::Gt)
-        } else {
-            None
-        };
-
-        if let Some(op) = op {
-            let right = parse_additive(stream)?;
-            return Ok(Expr::Binary {
-                left: Box::new(expr),
-                op,
-                right: Box::new(right),
+    if stream.consume_keyword(Keyword::Not) {
+        if stream.consume_keyword(Keyword::In) {
+            let list = parse_in_list(stream)?;
+            return Ok(Expr::InList {
+                expr: Box::new(expr),
+                list,
+                negated: true,
             });
         }
-        return Ok(expr);
+        if stream.consume_keyword(Keyword::Between) {
+            let low = parse_additive(stream)?;
+            stream.expect_keyword(Keyword::And)?;
+            let high = parse_additive(stream)?;
+            return Ok(Expr::Between {
+                expr: Box::new(expr),
+                low: Box::new(low),
+                high: Box::new(high),
+                negated: true,
+            });
+        }
+        return Err(stream.error("expected IN or BETWEEN", None));
+    }
+
+    if stream.consume_keyword(Keyword::In) {
+        let list = parse_in_list(stream)?;
+        return Ok(Expr::InList {
+            expr: Box::new(expr),
+            list,
+            negated: false,
+        });
+    }
+
+    if stream.consume_keyword(Keyword::Between) {
+        let low = parse_additive(stream)?;
+        stream.expect_keyword(Keyword::And)?;
+        let high = parse_additive(stream)?;
+        return Ok(Expr::Between {
+            expr: Box::new(expr),
+            low: Box::new(low),
+            high: Box::new(high),
+            negated: false,
+        });
+    }
+
+    let op = if stream.consume_symbol(Symbol::Equal) {
+        Some(BinaryOp::Eq)
+    } else if stream.consume_symbol(Symbol::NotEqual) {
+        Some(BinaryOp::NotEq)
+    } else if stream.consume_symbol(Symbol::LessEqual) {
+        Some(BinaryOp::Lte)
+    } else if stream.consume_symbol(Symbol::GreaterEqual) {
+        Some(BinaryOp::Gte)
+    } else if stream.consume_symbol(Symbol::Less) {
+        Some(BinaryOp::Lt)
+    } else if stream.consume_symbol(Symbol::Greater) {
+        Some(BinaryOp::Gt)
+    } else {
+        None
     };
 
-    let low = parse_additive(stream)?;
-    stream.expect_keyword(Keyword::And)?;
-    let high = parse_additive(stream)?;
-    Ok(Expr::Between {
-        expr: Box::new(expr),
-        low: Box::new(low),
-        high: Box::new(high),
-        negated,
-    })
+    if let Some(op) = op {
+        let right = parse_additive(stream)?;
+        return Ok(Expr::Binary {
+            left: Box::new(expr),
+            op,
+            right: Box::new(right),
+        });
+    }
+
+    Ok(expr)
+}
+
+fn parse_in_list(stream: &mut TokenStream) -> Result<Vec<Expr>, ParseError> {
+    stream.expect_symbol(Symbol::LParen)?;
+    if stream.consume_symbol(Symbol::RParen) {
+        return Err(stream.error("expected expression", stream.last_span_start()));
+    }
+    let mut list = Vec::new();
+    list.push(parse_expr(stream)?);
+    while stream.consume_symbol(Symbol::Comma) {
+        list.push(parse_expr(stream)?);
+    }
+    stream.expect_symbol(Symbol::RParen)?;
+    Ok(list)
 }
 
 fn parse_additive(stream: &mut TokenStream) -> Result<Expr, ParseError> {
@@ -791,7 +969,7 @@ mod tests {
             Statement::Select(stmt) => {
                 assert_eq!(stmt.items.len(), 2);
                 assert_eq!(
-                    stmt.from.as_ref().map(|from| from.table.as_str()),
+                    stmt.from.first().map(|from| from.table.as_str()),
                     Some("users")
                 );
                 assert!(stmt.filter.is_some());
@@ -847,8 +1025,123 @@ mod tests {
     }
 
     #[test]
+    fn parse_in_list_expressions() {
+        let statements = parse(
+            "SELECT id IN (1, 2, 3) FROM users WHERE name NOT IN ('Ada', 'Bob')",
+        )
+        .expect("parse");
+        match &statements[0] {
+            Statement::Select(stmt) => {
+                assert_eq!(stmt.items.len(), 1);
+                match &stmt.items[0] {
+                    SelectItem::Expr(Expr::InList { expr, list, negated }) => {
+                        assert!(!negated);
+                        assert_eq!(list.len(), 3);
+                        assert!(matches!(
+                            &**expr,
+                            Expr::Identifier(parts) if parts == &vec!["id".to_string()]
+                        ));
+                    }
+                    _ => panic!("expected IN list expression"),
+                }
+                match stmt.filter.as_ref() {
+                    Some(Expr::InList { expr, list, negated }) => {
+                        assert!(*negated);
+                        assert_eq!(list.len(), 2);
+                        assert!(matches!(
+                            &**expr,
+                            Expr::Identifier(parts) if parts == &vec!["name".to_string()]
+                        ));
+                    }
+                    _ => panic!("expected NOT IN filter"),
+                }
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_union_all_expressions() {
+        let statements = parse("SELECT 1 UNION ALL SELECT 2").expect("parse");
+        match &statements[0] {
+            Statement::SetOperation(SetExpr::SetOp { left, op, right, all }) => {
+                assert_eq!(*op, SetOp::Union);
+                assert!(*all);
+                assert!(matches!(**left, SetExpr::Select(_)));
+                assert!(matches!(**right, SetExpr::Select(_)));
+            }
+            _ => panic!("expected set operation"),
+        }
+    }
+
+    #[test]
+    fn parse_set_operations_left_associative() {
+        let statements = parse("SELECT 1 UNION SELECT 2 UNION SELECT 3").expect("parse");
+        match &statements[0] {
+            Statement::SetOperation(SetExpr::SetOp { left, op, right, all }) => {
+                assert_eq!(*op, SetOp::Union);
+                assert!(!*all);
+                assert!(matches!(**right, SetExpr::Select(_)));
+                match &**left {
+                    SetExpr::SetOp { op, all, .. } => {
+                        assert_eq!(*op, SetOp::Union);
+                        assert!(!*all);
+                    }
+                    _ => panic!("expected left-associative set op"),
+                }
+            }
+            _ => panic!("expected set operation"),
+        }
+    }
+
+    #[test]
+    fn parse_intersect_except_expressions() {
+        let statements =
+            parse("SELECT 1 INTERSECT SELECT 2 EXCEPT SELECT 3").expect("parse");
+        match &statements[0] {
+            Statement::SetOperation(SetExpr::SetOp { left, op, right, all }) => {
+                assert_eq!(*op, SetOp::Except);
+                assert!(!*all);
+                assert!(matches!(**right, SetExpr::Select(_)));
+                match &**left {
+                    SetExpr::SetOp { op, .. } => assert_eq!(*op, SetOp::Intersect),
+                    _ => panic!("expected intersect on left"),
+                }
+            }
+            _ => panic!("expected set operation"),
+        }
+    }
+
+    #[test]
     fn parse_invalid_statement_reports_error() {
         let err = parse("BOGUS").expect_err("error");
         assert!(err.message.contains("expected statement"));
+    }
+
+    #[test]
+    fn parse_varchar_type_in_create_table() {
+        let statements = parse("CREATE TABLE t1 (name VARCHAR(30))").expect("parse");
+        match &statements[0] {
+            Statement::CreateTable(stmt) => {
+                assert_eq!(stmt.columns.len(), 1);
+                assert!(matches!(stmt.columns[0].data_type, TypeName::Text));
+            }
+            _ => panic!("expected create table"),
+        }
+    }
+
+    #[test]
+    fn parse_create_index_statement() {
+        let statements = parse("CREATE INDEX idx ON t1(a1 DESC, b1)").expect("parse");
+        match &statements[0] {
+            Statement::CreateIndex(stmt) => {
+                assert_eq!(stmt.name, "idx");
+                assert_eq!(stmt.table, "t1");
+                assert_eq!(stmt.columns.len(), 2);
+                assert!(matches!(stmt.columns[0].direction, Some(OrderDirection::Desc)));
+                assert!(stmt.columns[1].direction.is_none());
+            }
+            _ => panic!("expected create index"),
+        }
     }
 }

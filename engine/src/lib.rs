@@ -321,6 +321,7 @@ impl Database {
                     let table = table_from_ast(create)?;
                     self.create_table_unlocked(table)?;
                 }
+                crate::sql::parser::Statement::CreateIndex(_create) => {}
                 crate::sql::parser::Statement::DropTable(drop) => {
                     self.drop_table_unlocked(&drop.name)?;
                 }
@@ -334,6 +335,13 @@ impl Database {
                         _ => unreachable!("select statement"),
                     };
                     last_result = crate::sql::interpreter::execute_select(select, self)?;
+                }
+                crate::sql::parser::Statement::SetOperation(_) => {
+                    let expr = match statement {
+                        crate::sql::parser::Statement::SetOperation(expr) => expr,
+                        _ => unreachable!("set operation statement"),
+                    };
+                    last_result = crate::sql::interpreter::execute_set_expr(expr, self)?;
                 }
             }
         }

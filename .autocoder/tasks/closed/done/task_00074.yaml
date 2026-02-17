@@ -1,0 +1,15 @@
+name: join-apply-predicates
+
+description: >
+  Apply join predicates during each join step to reduce intermediate rows.
+
+story_points: 3
+
+acceptence_critria:
+  - Join predicates are evaluated during join expansion
+  - Intermediate row counts drop relative to cross-product approach
+  - Unit tests added for this task
+
+deppends_on:
+  - task_00073
+  - task_00071

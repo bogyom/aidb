@@ -1,0 +1,13 @@
+name: executor-union-distinct
+description: >
+  Execute UNION with distinct row semantics.
+
+story_points: 3
+
+acceptence_critria:
+  - UNION returns distinct rows across both operands
+  - NULLs are treated as equal for de-duplication
+  - Unit tests added for this task
+deppends_on:
+  - task_00059
+  - task_00018

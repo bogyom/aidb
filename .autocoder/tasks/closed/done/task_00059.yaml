@@ -1,0 +1,13 @@
+name: planner-setop-alignment
+description: >
+  Plan set operations with column count checks and output column alignment.
+
+story_points: 3
+
+acceptence_critria:
+  - Planner enforces same column count across set operands
+  - Output column metadata is derived from the left operand
+  - Unit tests added for this task
+deppends_on:
+  - task_00033
+  - task_00058

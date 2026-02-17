@@ -1,0 +1,14 @@
+name: join-exec-incremental
+
+description: >
+  Implement incremental nested-loop join execution without full cross-products.
+
+story_points: 5
+
+acceptence_critria:
+  - Joins are executed incrementally per table order
+  - Cross-product of all tables is no longer materialized
+  - Unit tests added for this task
+
+deppends_on:
+  - task_00072

@@ -417,6 +417,16 @@ impl<D: AsyncDB> Runner<D> {
         }
     }
 
+    /// Access the underlying database instance.
+    pub fn db_mut(&mut self) -> &mut D {
+        &mut self.db
+    }
+
+    /// Access the underlying database instance.
+    pub fn db(&self) -> &D {
+        &self.db
+    }
+
     /// Replace the pattern `__TEST_DIR__` in SQL with a temporary directory path.
     ///
     /// This feature is useful in those tests where data will be written to local
@@ -501,7 +511,18 @@ impl<D: AsyncDB> Runner<D> {
                     Some(SortMode::RowSort) => {
                         rows.sort_unstable();
                     }
-                    Some(SortMode::ValueSort) => todo!("value sort"),
+                    Some(SortMode::ValueSort) => {
+                        let width = rows.get(0).map(|row| row.len()).unwrap_or(0);
+                        if width > 0 {
+                            let mut values: Vec<String> =
+                                rows.into_iter().flatten().collect();
+                            values.sort_unstable();
+                            rows = values
+                                .chunks(width)
+                                .map(|chunk| chunk.to_vec())
+                                .collect();
+                        }
+                    }
                 };
 
                 let value_count = rows

@@ -1,0 +1,15 @@
+name: join-order-heuristic
+
+description: >
+  Implement a simple join ordering heuristic based on filtered row counts.
+
+story_points: 2
+
+acceptence_critria:
+  - Join order uses estimated row counts from filtered tables
+  - Heuristic is deterministic for the same inputs
+  - Unit tests added for this task
+
+deppends_on:
+  - task_00070
+  - task_00071

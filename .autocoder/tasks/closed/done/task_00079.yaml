@@ -1,0 +1,18 @@
+name: select4-perf-verify
+
+description: >
+  Re-run select1/2/3 and select4 to validate correctness and speed improvements.
+
+story_points: 1
+
+acceptence_critria:
+  - select1, select2, and select3 pass
+  - select4 completes in a few seconds on a typical dev machine
+  - Results match expected sqllogictest outputs
+
+deppends_on:
+  - task_00074
+  - task_00075
+  - task_00076
+  - task_00077
+  - task_00078

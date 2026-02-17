@@ -1,0 +1,14 @@
+name: slt-slowest-summary
+
+description: >
+  Emit a summary of the slowest select4.test queries after the run completes.
+
+story_points: 1
+
+acceptence_critria:
+  - Summary lists at least the top 10 slowest queries
+  - Summary shows query identifier and total duration
+  - Unit tests added for this task
+
+deppends_on:
+  - task_00066

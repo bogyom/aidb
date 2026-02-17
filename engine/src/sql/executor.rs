@@ -1,3 +1,4 @@
+use super::parser::SetOp;
 use super::planner::{
     BinaryOp, ExprPlan, FunctionArgPlan, OrderByPlan, PlanNode, ProjectionItem, UnaryOp,
 };
@@ -54,7 +55,117 @@ pub fn execute_plan(plan: &PlanNode, db: &crate::Database) -> Result<ExecResult,
             let result = execute_plan(input, db)?;
             project_rows(result, items)
         }
+        PlanNode::SetOp {
+            left,
+            op,
+            right,
+            all,
+            columns,
+        } => {
+            let left_result = execute_plan(left, db)?;
+            let right_result = execute_plan(right, db)?;
+            match op {
+                SetOp::Union => {
+                    let rows = if *all {
+                        let mut rows = left_result.rows;
+                        rows.extend(right_result.rows);
+                        rows
+                    } else {
+                        union_distinct_rows(left_result.rows, right_result.rows)
+                    };
+                    Ok(ExecResult {
+                        columns: columns.clone(),
+                        rows,
+                    })
+                }
+                SetOp::Intersect => {
+                    if *all {
+                        return Err(EngineError::InvalidSql);
+                    }
+                    let rows = intersect_distinct_rows(left_result.rows, right_result.rows);
+                    Ok(ExecResult {
+                        columns: columns.clone(),
+                        rows,
+                    })
+                }
+                SetOp::Except => {
+                    if *all {
+                        return Err(EngineError::InvalidSql);
+                    }
+                    let rows = except_distinct_rows(left_result.rows, right_result.rows);
+                    Ok(ExecResult {
+                        columns: columns.clone(),
+                        rows,
+                    })
+                }
+            }
+        }
     }
+}
+
+fn union_distinct_rows(
+    left_rows: Vec<Vec<Value>>,
+    right_rows: Vec<Vec<Value>>,
+) -> Vec<Vec<Value>> {
+    let mut result: Vec<Vec<Value>> = Vec::new();
+    for row in left_rows.into_iter().chain(right_rows) {
+        if !result.iter().any(|existing| rows_equal_with_nulls(existing, &row)) {
+            result.push(row);
+        }
+    }
+    result
+}
+
+fn rows_equal_with_nulls(left: &[Value], right: &[Value]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter().zip(right.iter()).all(|(l, r)| value_equal_with_nulls(l, r))
+}
+
+fn value_equal_with_nulls(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Null, Value::Null) => true,
+        _ => values_equal(left, right),
+    }
+}
+
+fn intersect_distinct_rows(
+    left_rows: Vec<Vec<Value>>,
+    right_rows: Vec<Vec<Value>>,
+) -> Vec<Vec<Value>> {
+    let mut result: Vec<Vec<Value>> = Vec::new();
+    for row in left_rows {
+        if result.iter().any(|existing| rows_equal_with_nulls(existing, &row)) {
+            continue;
+        }
+        if right_rows
+            .iter()
+            .any(|candidate| rows_equal_with_nulls(candidate, &row))
+        {
+            result.push(row);
+        }
+    }
+    result
+}
+
+fn except_distinct_rows(
+    left_rows: Vec<Vec<Value>>,
+    right_rows: Vec<Vec<Value>>,
+) -> Vec<Vec<Value>> {
+    let mut result: Vec<Vec<Value>> = Vec::new();
+    for row in left_rows {
+        if result.iter().any(|existing| rows_equal_with_nulls(existing, &row)) {
+            continue;
+        }
+        if !right_rows
+            .iter()
+            .any(|candidate| rows_equal_with_nulls(candidate, &row))
+        {
+            result.push(row);
+        }
+    }
+    result
 }
 
 fn project_rows(
@@ -256,6 +367,32 @@ fn eval_expr(expr: &ExprPlan, row: &[Value]) -> Result<Value, EngineError> {
             let between = value_cmp(&value, &low) != std::cmp::Ordering::Less
                 && value_cmp(&value, &high) != std::cmp::Ordering::Greater;
             Ok(Value::Boolean(if *negated { !between } else { between }))
+        }
+        ExprPlan::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let value = eval_expr(expr, row)?;
+            if matches!(value, Value::Null) {
+                return Ok(Value::Null);
+            }
+            let mut has_null = false;
+            for item in list {
+                let item_value = eval_expr(item, row)?;
+                if matches!(item_value, Value::Null) {
+                    has_null = true;
+                    continue;
+                }
+                if values_equal(&value, &item_value) {
+                    return Ok(Value::Boolean(!*negated));
+                }
+            }
+            if has_null {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::Boolean(*negated))
+            }
         }
         ExprPlan::IsNull { expr, negated } => {
             let value = eval_expr(expr, row)?;
@@ -523,6 +660,27 @@ mod tests {
     use super::*;
     use crate::sql::planner::{BinaryOp, ExprPlan, FunctionArgPlan, ProjectionItem};
     use crate::sql::parser::OrderDirection;
+    use crate::{Database, SqlType};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn eval_in_list(value: Value, list: Vec<Value>, negated: bool) -> Value {
+        let expr = ExprPlan::InList {
+            expr: Box::new(ExprPlan::Literal(value)),
+            list: list.into_iter().map(ExprPlan::Literal).collect(),
+            negated,
+        };
+        eval_expr(&expr, &[]).expect("eval")
+    }
+
+    fn temp_db_path(label: &str) -> String {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        path.push(format!("aidb_{label}_{nanos}.db"));
+        path.to_string_lossy().to_string()
+    }
 
     #[test]
     fn predicate_evaluates_eq() {
@@ -621,6 +779,176 @@ mod tests {
         };
         let value = eval_expr(&expr, &row).expect("eval");
         assert_eq!(value, Value::Null);
+    }
+
+    #[test]
+    fn in_list_semantics_with_nulls() {
+        let matched = eval_in_list(
+            Value::Integer(1),
+            vec![Value::Integer(1), Value::Null],
+            false,
+        );
+        assert_eq!(matched, Value::Boolean(true));
+
+        let no_match_no_null = eval_in_list(
+            Value::Integer(2),
+            vec![Value::Integer(1), Value::Integer(3)],
+            false,
+        );
+        assert_eq!(no_match_no_null, Value::Boolean(false));
+
+        let no_match_with_null = eval_in_list(
+            Value::Integer(2),
+            vec![Value::Integer(1), Value::Null],
+            false,
+        );
+        assert_eq!(no_match_with_null, Value::Null);
+    }
+
+    #[test]
+    fn not_in_list_semantics_with_nulls() {
+        let matched = eval_in_list(
+            Value::Integer(1),
+            vec![Value::Integer(1), Value::Null],
+            true,
+        );
+        assert_eq!(matched, Value::Boolean(false));
+
+        let no_match_no_null = eval_in_list(
+            Value::Integer(2),
+            vec![Value::Integer(1), Value::Integer(3)],
+            true,
+        );
+        assert_eq!(no_match_no_null, Value::Boolean(true));
+
+        let no_match_with_null = eval_in_list(
+            Value::Integer(2),
+            vec![Value::Integer(1), Value::Null],
+            true,
+        );
+        assert_eq!(no_match_with_null, Value::Null);
+    }
+
+    #[test]
+    fn union_distinct_deduplicates_with_nulls() {
+        let db = Database::create(temp_db_path("union_distinct")).expect("create");
+        let plan = PlanNode::SetOp {
+            left: Box::new(PlanNode::Values {
+                rows: vec![
+                    vec![Value::Integer(1)],
+                    vec![Value::Null],
+                    vec![Value::Null],
+                ],
+            }),
+            op: SetOp::Union,
+            right: Box::new(PlanNode::Values {
+                rows: vec![
+                    vec![Value::Integer(1)],
+                    vec![Value::Null],
+                    vec![Value::Integer(2)],
+                ],
+            }),
+            all: false,
+            columns: vec![ColumnMeta::new("col", SqlType::Integer)],
+        };
+
+        let result = execute_plan(&plan, &db).expect("execute");
+        assert_eq!(
+            result.columns,
+            vec![ColumnMeta::new("col", SqlType::Integer)]
+        );
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(1)],
+                vec![Value::Null],
+                vec![Value::Integer(2)],
+            ]
+        );
+    }
+
+    #[test]
+    fn union_all_preserves_order_and_duplicates() {
+        let db = Database::create(temp_db_path("union_all")).expect("create");
+        let plan = PlanNode::SetOp {
+            left: Box::new(PlanNode::Values {
+                rows: vec![vec![Value::Integer(1)], vec![Value::Integer(1)]],
+            }),
+            op: SetOp::Union,
+            right: Box::new(PlanNode::Values {
+                rows: vec![vec![Value::Integer(1)], vec![Value::Integer(2)]],
+            }),
+            all: true,
+            columns: vec![ColumnMeta::new("col", SqlType::Integer)],
+        };
+
+        let result = execute_plan(&plan, &db).expect("execute");
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(1)],
+                vec![Value::Integer(1)],
+                vec![Value::Integer(1)],
+                vec![Value::Integer(2)],
+            ]
+        );
+    }
+
+    #[test]
+    fn intersect_distinct_deduplicates_with_nulls() {
+        let db = Database::create(temp_db_path("intersect_distinct")).expect("create");
+        let plan = PlanNode::SetOp {
+            left: Box::new(PlanNode::Values {
+                rows: vec![
+                    vec![Value::Integer(1)],
+                    vec![Value::Integer(1)],
+                    vec![Value::Null],
+                ],
+            }),
+            op: SetOp::Intersect,
+            right: Box::new(PlanNode::Values {
+                rows: vec![
+                    vec![Value::Integer(1)],
+                    vec![Value::Null],
+                    vec![Value::Null],
+                ],
+            }),
+            all: false,
+            columns: vec![ColumnMeta::new("col", SqlType::Integer)],
+        };
+
+        let result = execute_plan(&plan, &db).expect("execute");
+        assert_eq!(
+            result.rows,
+            vec![vec![Value::Integer(1)], vec![Value::Null]]
+        );
+    }
+
+    #[test]
+    fn except_distinct_excludes_with_nulls() {
+        let db = Database::create(temp_db_path("except_distinct")).expect("create");
+        let plan = PlanNode::SetOp {
+            left: Box::new(PlanNode::Values {
+                rows: vec![
+                    vec![Value::Integer(1)],
+                    vec![Value::Integer(1)],
+                    vec![Value::Null],
+                    vec![Value::Integer(2)],
+                ],
+            }),
+            op: SetOp::Except,
+            right: Box::new(PlanNode::Values {
+                rows: vec![vec![Value::Null], vec![Value::Integer(3)]],
+            }),
+            all: false,
+            columns: vec![ColumnMeta::new("col", SqlType::Integer)],
+        };
+
+        let result = execute_plan(&plan, &db).expect("execute");
+        assert_eq!(
+            result.rows,
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]
+        );
     }
 
     #[test]

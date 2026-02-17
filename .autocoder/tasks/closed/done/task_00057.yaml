@@ -1,0 +1,13 @@
+name: executor-in-not-in
+description: >
+  Implement runtime evaluation for IN/NOT IN with SQL NULL semantics.
+
+story_points: 5
+
+acceptence_critria:
+  - IN returns TRUE on match, FALSE on no match with no NULLs, NULL on no match with NULLs present
+  - NOT IN returns FALSE on match, TRUE on no match with no NULLs, NULL on no match with NULLs present
+  - Unit tests added for this task
+deppends_on:
+  - task_00041
+  - task_00056

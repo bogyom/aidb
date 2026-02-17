@@ -1,0 +1,14 @@
+name: slt-query-timing
+
+description: >
+  Add per-query timing output in the sqllogictest runner for select4.test.
+
+story_points: 1
+
+acceptence_critria:
+  - Query-level timings are logged during sqllogictest runs
+  - Timing output includes query identifier and duration
+  - Unit tests added for this task
+
+deppends_on:
+  - task_00063

@@ -1,0 +1,14 @@
+name: predicate-table-usage
+
+description: >
+  Implement table-usage analysis for predicates to identify referenced tables.
+
+story_points: 2
+
+acceptence_critria:
+  - Analyzer returns referenced table indices for each predicate
+  - Ambiguous references are detected and reported
+  - Unit tests added for this task
+
+deppends_on:
+  - task_00068

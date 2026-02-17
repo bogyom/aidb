@@ -1,0 +1,14 @@
+name: join-predicate-extraction
+
+description: >
+  Extract multi-table predicates and associate them with table pairs for joins.
+
+story_points: 2
+
+acceptence_critria:
+  - Join predicates are identified separately from single-table predicates
+  - Predicates are grouped by the tables they reference
+  - Unit tests added for this task
+
+deppends_on:
+  - task_00069

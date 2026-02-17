@@ -1,0 +1,14 @@
+name: filter-pushdown-single-table
+
+description: >
+  Push down single-table predicates to filter base table rows before joins.
+
+story_points: 3
+
+acceptence_critria:
+  - Single-table predicates are applied prior to join execution
+  - Results are unchanged compared to pre-pushdown behavior
+  - Unit tests added for this task
+
+deppends_on:
+  - task_00069

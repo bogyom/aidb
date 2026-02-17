@@ -1,10 +1,10 @@
 use super::lexer::Literal as AstLiteral;
 use super::parser::{
     Expr as AstExpr, FunctionArg as AstFunctionArg, OrderDirection, Select, SelectItem,
-    Statement, UnaryOp as AstUnaryOp,
+    SetExpr, SetOp, Statement, UnaryOp as AstUnaryOp,
 };
 use super::parser::BinaryOp as AstBinaryOp;
-use crate::{Catalog, SqlType, TableSchema, Value};
+use crate::{Catalog, ColumnMeta, SqlType, TableSchema, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
@@ -19,6 +19,13 @@ pub enum PlanNode {
     Order { by: Vec<OrderByPlan>, input: Box<PlanNode> },
     Limit { limit: usize, input: Box<PlanNode> },
     Projection { items: Vec<ProjectionItem>, input: Box<PlanNode> },
+    SetOp {
+        left: Box<PlanNode>,
+        op: SetOp,
+        right: Box<PlanNode>,
+        all: bool,
+        columns: Vec<ColumnMeta>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +65,11 @@ pub enum ExprPlan {
         expr: Box<ExprPlan>,
         low: Box<ExprPlan>,
         high: Box<ExprPlan>,
+        negated: bool,
+    },
+    InList {
+        expr: Box<ExprPlan>,
+        list: Vec<ExprPlan>,
         negated: bool,
     },
     Case {
@@ -115,15 +127,24 @@ impl PlanError {
 pub fn plan_statement(statement: &Statement, catalog: &Catalog) -> Result<Option<Plan>, PlanError> {
     match statement {
         Statement::Select(select) => plan_select(select, catalog).map(Some),
+        Statement::SetOperation(expr) => {
+            let root = plan_set_expr(expr, catalog)?;
+            Ok(Some(Plan { root }))
+        }
         _ => Ok(None),
     }
 }
 
 pub fn plan_select(select: &Select, catalog: &Catalog) -> Result<Plan, PlanError> {
-    let table = select
-        .from
-        .as_ref()
-        .and_then(|from| catalog.table(&from.table));
+    let table = match select.from.as_slice() {
+        [] => None,
+        [from] => catalog.table(&from.table),
+        _ => {
+            return Err(PlanError::new(
+                "select with multiple tables is not supported",
+            ))
+        }
+    };
 
     let input = if let Some(table) = table {
         PlanNode::Scan(TableScan {
@@ -173,6 +194,56 @@ pub fn plan_select(select: &Select, catalog: &Catalog) -> Result<Plan, PlanError
     };
 
     Ok(Plan { root: node })
+}
+
+fn plan_set_expr(expr: &SetExpr, catalog: &Catalog) -> Result<PlanNode, PlanError> {
+    match expr {
+        SetExpr::Select(select) => Ok(plan_select(select, catalog)?.root),
+        SetExpr::SetOp { left, op, right, all } => {
+            let left_plan = plan_set_expr(left, catalog)?;
+            let right_plan = plan_set_expr(right, catalog)?;
+            let left_columns = output_columns(&left_plan)?;
+            let right_columns = output_columns(&right_plan)?;
+            if left_columns.len() != right_columns.len() {
+                return Err(PlanError::new(
+                    "set operation requires operands with same column count",
+                ));
+            }
+            Ok(PlanNode::SetOp {
+                left: Box::new(left_plan),
+                op: *op,
+                right: Box::new(right_plan),
+                all: *all,
+                columns: left_columns,
+            })
+        }
+    }
+}
+
+fn output_columns(plan: &PlanNode) -> Result<Vec<ColumnMeta>, PlanError> {
+    match plan {
+        PlanNode::Values { rows } => {
+            let width = rows.first().map(|row| row.len()).unwrap_or(0);
+            let mut columns = Vec::with_capacity(width);
+            for _ in 0..width {
+                columns.push(ColumnMeta::new("expr", SqlType::Text));
+            }
+            Ok(columns)
+        }
+        PlanNode::Scan(scan) => Ok(scan
+            .columns
+            .iter()
+            .map(|col| ColumnMeta::new(col.name.clone(), col.sql_type))
+            .collect()),
+        PlanNode::Filter { input, .. }
+        | PlanNode::Order { input, .. }
+        | PlanNode::Limit { input, .. } => output_columns(input),
+        PlanNode::Projection { items, .. } => Ok(items
+            .iter()
+            .map(|item| ColumnMeta::new(item.label.clone(), item.sql_type))
+            .collect()),
+        PlanNode::SetOp { columns, .. } => Ok(columns.clone()),
+    }
 }
 
 fn plan_projection_items(
@@ -275,6 +346,9 @@ fn expr_contains_aggregate(expr: &ExprPlan) -> bool {
             expr_contains_aggregate(expr)
                 || expr_contains_aggregate(low)
                 || expr_contains_aggregate(high)
+        }
+        ExprPlan::InList { expr, list, .. } => {
+            expr_contains_aggregate(expr) || list.iter().any(expr_contains_aggregate)
         }
         ExprPlan::Case {
             operand,
@@ -379,6 +453,24 @@ fn plan_expr(expr: &AstExpr, table: Option<&TableSchema>) -> Result<ExprPlan, Pl
             high: Box::new(plan_expr(high, table)?),
             negated: *negated,
         }),
+        AstExpr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let planned_expr = plan_expr(expr, table)?;
+            let mut planned_list = Vec::with_capacity(list.len());
+            for item in list {
+                let planned_item = plan_expr(item, table)?;
+                ensure_comparable(&BinaryOp::Eq, &planned_expr, &planned_item)?;
+                planned_list.push(planned_item);
+            }
+            Ok(ExprPlan::InList {
+                expr: Box::new(planned_expr),
+                list: planned_list,
+                negated: *negated,
+            })
+        }
         AstExpr::Case {
             operand,
             when_thens,
@@ -596,6 +688,7 @@ fn expr_plan_type(expr: &ExprPlan) -> SqlType {
             BinaryOp::Div => SqlType::Real,
         },
         ExprPlan::Between { .. } => SqlType::Boolean,
+        ExprPlan::InList { .. } => SqlType::Boolean,
         ExprPlan::IsNull { .. } => SqlType::Boolean,
         ExprPlan::Exists(_) => SqlType::Boolean,
         ExprPlan::Case {
@@ -635,7 +728,7 @@ fn expr_plan_type(expr: &ExprPlan) -> SqlType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Catalog, ColumnSchema, SqlType, TableSchema};
+    use crate::{Catalog, ColumnMeta, ColumnSchema, SqlType, TableSchema};
     use super::super::parser;
     use std::path::Path;
 
@@ -992,6 +1085,70 @@ mod tests {
         match expr {
             ExprPlan::Between { negated, .. } => assert!(negated),
             _ => panic!("expected NOT BETWEEN expression"),
+        }
+    }
+
+    #[test]
+    fn planner_rejects_mismatched_set_op_columns() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse(
+            "SELECT id FROM users UNION SELECT id, name FROM users",
+        )
+        .expect("parse");
+        let err = plan_statement(&statements[0], &catalog).expect_err("expected error");
+        assert!(err.message.contains("column count"));
+    }
+
+    #[test]
+    fn planner_uses_left_columns_for_set_op_output() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse(
+            "SELECT id, name FROM users UNION SELECT name, id FROM users",
+        )
+        .expect("parse");
+        let plan = plan_statement(&statements[0], &catalog)
+            .expect("plan")
+            .expect("plan");
+        match plan.root {
+            PlanNode::SetOp { columns, .. } => {
+                assert_eq!(
+                    columns,
+                    vec![
+                        ColumnMeta::new("id", SqlType::Integer),
+                        ColumnMeta::new("name", SqlType::Text)
+                    ]
+                );
+            }
+            _ => panic!("expected set operation plan"),
+        }
+    }
+
+    #[test]
+    fn planner_plans_in_list_expressions() {
+        let catalog = catalog_with_users();
+        let expr = planned_filter_expr("SELECT name FROM users WHERE id IN (1, 2, NULL)", &catalog);
+        match expr {
+            ExprPlan::InList { expr, list, negated } => {
+                assert!(!negated);
+                assert!(matches!(*expr, ExprPlan::Column(_)));
+                assert_eq!(list.len(), 3);
+                assert!(matches!(list[0], ExprPlan::Literal(Value::Integer(1))));
+                assert!(matches!(list[2], ExprPlan::Literal(Value::Null)));
+            }
+            _ => panic!("expected IN list expression"),
+        }
+    }
+
+    #[test]
+    fn planner_plans_not_in_list_expressions() {
+        let catalog = catalog_with_users();
+        let expr = planned_filter_expr("SELECT name FROM users WHERE id NOT IN (1, 2)", &catalog);
+        match expr {
+            ExprPlan::InList { negated, list, .. } => {
+                assert!(negated);
+                assert_eq!(list.len(), 2);
+            }
+            _ => panic!("expected NOT IN list expression"),
         }
     }
 

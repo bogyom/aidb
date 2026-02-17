@@ -1,0 +1,14 @@
+name: parser-set-ops
+description: >
+  Add SQL lexer keywords and parser AST support for UNION/UNION ALL/INTERSECT/EXCEPT.
+
+story_points: 3
+
+acceptence_critria:
+  - Lexer recognizes UNION, ALL, INTERSECT, and EXCEPT
+  - Parser builds AST nodes for set operations between SELECT statements
+  - Set operations parse left-associatively with UNION ALL distinct from UNION
+  - Unit tests added for this task
+deppends_on:
+  - task_00012
+  - task_00013

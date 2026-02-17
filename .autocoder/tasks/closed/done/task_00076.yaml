@@ -1,0 +1,14 @@
+name: limit-early-exit-join
+
+description: >
+  Honor LIMIT as soon as enough rows are produced during joins.
+
+story_points: 2
+
+acceptence_critria:
+  - LIMIT stops join execution after required rows produced
+  - Results match pre-join behavior
+  - Unit tests added for this task
+
+deppends_on:
+  - task_00073
