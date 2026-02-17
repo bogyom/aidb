@@ -1,0 +1,14 @@
+name: sqllogictest-random-groupby
+
+description: >
+  Include tests from tests/sqllogictest/test/random/groupby in the sqllogictest harness runs.
+
+story_points: 2
+
+acceptence_critria:
+  - Harness runs .test files under tests/sqllogictest/test/random/groupby
+  - All tests under tests/sqllogictest/test/random/groupby pass
+  - Runs under timeout in CI/local guidance
+
+deppends_on:
+  - 

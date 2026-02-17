@@ -867,7 +867,17 @@ fn expr_plan_type(expr: &ExprPlan) -> SqlType {
                     SqlType::Text
                 }
             }
-            BinaryOp::Div => SqlType::Real,
+            BinaryOp::Div => {
+                let left = expr_plan_type(left);
+                let right = expr_plan_type(right);
+                if left == SqlType::Real || right == SqlType::Real {
+                    SqlType::Real
+                } else if left == SqlType::Integer && right == SqlType::Integer {
+                    SqlType::Integer
+                } else {
+                    SqlType::Text
+                }
+            }
             BinaryOp::DivInt => SqlType::Integer,
         },
         ExprPlan::Between { .. } => SqlType::Boolean,

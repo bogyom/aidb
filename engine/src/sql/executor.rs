@@ -490,12 +490,7 @@ fn eval_expr(expr: &ExprPlan, row: &[Value]) -> Result<Value, EngineError> {
             let value = eval_expr(expr, row)?;
             let low = eval_expr(low, row)?;
             let high = eval_expr(high, row)?;
-            if matches!(value, Value::Null) || matches!(low, Value::Null) || matches!(high, Value::Null) {
-                return Ok(Value::Null);
-            }
-            let between = value_cmp(&value, &low) != std::cmp::Ordering::Less
-                && value_cmp(&value, &high) != std::cmp::Ordering::Greater;
-            Ok(Value::Boolean(if *negated { !between } else { between }))
+            eval_between_values(value, low, high, *negated)
         }
         ExprPlan::InList {
             expr,
@@ -617,6 +612,26 @@ fn eval_expr(expr: &ExprPlan, row: &[Value]) -> Result<Value, EngineError> {
             }
         }
         ExprPlan::Subquery(_) | ExprPlan::Exists(_) => Err(EngineError::InvalidSql),
+    }
+}
+
+fn eval_between_values(
+    value: Value,
+    low: Value,
+    high: Value,
+    negated: bool,
+) -> Result<Value, EngineError> {
+    let lower = compare_with_nulls(value.clone(), low, |l, r| {
+        Value::Boolean(value_cmp(&l, &r) != std::cmp::Ordering::Less)
+    })?;
+    let upper = compare_with_nulls(value, high, |l, r| {
+        Value::Boolean(value_cmp(&l, &r) != std::cmp::Ordering::Greater)
+    })?;
+    let between = three_valued_and(lower, upper)?;
+    match between {
+        Value::Boolean(value) => Ok(Value::Boolean(if negated { !value } else { value })),
+        Value::Null => Ok(Value::Null),
+        _ => Err(EngineError::InvalidSql),
     }
 }
 
@@ -752,29 +767,25 @@ fn numeric_div(left: Value, right: Value) -> Result<Value, EngineError> {
         (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         (Value::Integer(a), Value::Integer(b)) => {
             if b == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
-            if a % b == 0 {
-                Ok(Value::Integer(a / b))
-            } else {
-                Ok(Value::Real(a as f64 / b as f64))
-            }
+            Ok(Value::Integer(a / b))
         }
         (Value::Integer(a), Value::Real(b)) => {
             if b == 0.0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Real(a as f64 / b))
         }
         (Value::Real(a), Value::Integer(b)) => {
             if b == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Real(a / b as f64))
         }
         (Value::Real(a), Value::Real(b)) => {
             if b == 0.0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Real(a / b))
         }
@@ -787,27 +798,27 @@ fn numeric_div_int(left: Value, right: Value) -> Result<Value, EngineError> {
         (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         (Value::Integer(a), Value::Integer(b)) => {
             if b == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Integer(a / b))
         }
         (Value::Integer(a), Value::Real(b)) => {
             let b_int = b.trunc() as i64;
             if b_int == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Integer(a / b_int))
         }
         (Value::Real(a), Value::Integer(b)) => {
             if b == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Integer(a.trunc() as i64 / b))
         }
         (Value::Real(a), Value::Real(b)) => {
             let b_int = b.trunc() as i64;
             if b_int == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Integer(a.trunc() as i64 / b_int))
         }
@@ -996,6 +1007,15 @@ mod tests {
         };
         let value = eval_expr(&expr, &row).expect("eval");
         assert_eq!(value, Value::Null);
+
+        let expr = ExprPlan::Between {
+            expr: Box::new(ExprPlan::Literal(Value::Integer(2))),
+            low: Box::new(ExprPlan::Literal(Value::Null)),
+            high: Box::new(ExprPlan::Literal(Value::Integer(1))),
+            negated: false,
+        };
+        let value = eval_expr(&expr, &row).expect("eval");
+        assert_eq!(value, Value::Boolean(false));
 
         let expr = ExprPlan::Between {
             expr: Box::new(ExprPlan::Literal(Value::Integer(2))),
@@ -1324,21 +1344,23 @@ mod tests {
     }
 
     #[test]
-    fn division_by_zero_returns_error() {
+    fn division_by_zero_returns_null() {
         let row = vec![];
         let expr = ExprPlan::Binary {
             left: Box::new(ExprPlan::Literal(Value::Integer(10))),
             op: BinaryOp::Div,
             right: Box::new(ExprPlan::Literal(Value::Integer(0))),
         };
-        assert!(eval_expr(&expr, &row).is_err());
+        let value = eval_expr(&expr, &row).expect("eval");
+        assert_eq!(value, Value::Null);
 
         let expr = ExprPlan::Binary {
             left: Box::new(ExprPlan::Literal(Value::Real(10.0))),
             op: BinaryOp::Div,
             right: Box::new(ExprPlan::Literal(Value::Real(0.0))),
         };
-        assert!(eval_expr(&expr, &row).is_err());
+        let value = eval_expr(&expr, &row).expect("eval");
+        assert_eq!(value, Value::Null);
     }
 
     #[test]

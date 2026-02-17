@@ -1335,7 +1335,7 @@ mod tests {
         );
 
         let result = db
-            .execute("SELECT id FROM nums WHERE id / 2 = 1.5")
+            .execute("SELECT id FROM nums WHERE id / 2.0 = 1.5")
             .expect("select");
         assert_eq!(result.rows, vec![vec![Value::Integer(3)]]);
     }

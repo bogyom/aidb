@@ -208,6 +208,17 @@ fn validate_select(select: &Select, catalog: &Catalog) -> Result<(), ValidationE
         validate_expr(filter, &tables)?;
     }
 
+    for from in &select.from {
+        if let Some(on_expr) = &from.left_join_on {
+            if expr_contains_identifier(on_expr) {
+                return Err(ValidationError::unsupported(
+                    "LEFT JOIN ON must be constant",
+                ));
+            }
+            validate_expr(on_expr, &tables)?;
+        }
+    }
+
     for expr in &select.group_by {
         validate_expr(expr, &tables)?;
     }
@@ -413,6 +424,7 @@ mod tests {
             from: vec![parser::FromClause {
                 table: "users".to_string(),
                 alias: None,
+                left_join_on: None,
             }],
             filter: None,
             group_by: Vec::new(),
@@ -435,6 +447,7 @@ mod tests {
             from: vec![parser::FromClause {
                 table: "users".to_string(),
                 alias: None,
+                left_join_on: None,
             }],
             filter: None,
             group_by: Vec::new(),
@@ -455,6 +468,7 @@ mod tests {
             from: vec![parser::FromClause {
                 table: "users".to_string(),
                 alias: None,
+                left_join_on: None,
             }],
             filter: None,
             group_by: vec![Expr::Identifier(vec!["age".to_string()])],
@@ -475,6 +489,7 @@ mod tests {
             from: vec![parser::FromClause {
                 table: "users".to_string(),
                 alias: None,
+                left_join_on: None,
             }],
             filter: None,
             group_by: vec![Expr::Identifier(vec!["id".to_string()])],
@@ -495,6 +510,7 @@ mod tests {
             from: vec![parser::FromClause {
                 table: "users".to_string(),
                 alias: Some("u".to_string()),
+                left_join_on: None,
             }],
             filter: None,
             group_by: vec![Expr::Identifier(vec![

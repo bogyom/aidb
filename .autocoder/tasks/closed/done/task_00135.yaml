@@ -1,0 +1,14 @@
+name: sqllogictest-random-aggregates
+
+description: >
+  Include tests from tests/sqllogictest/test/random/aggregates in the sqllogictest harness runs.
+
+story_points: 2
+
+acceptence_critria:
+  - Harness runs .test files under tests/sqllogictest/test/random/aggregates
+  - All tests under tests/sqllogictest/test/random/aggregates pass
+  - Runs under timeout in CI/local guidance
+
+deppends_on:
+  - 

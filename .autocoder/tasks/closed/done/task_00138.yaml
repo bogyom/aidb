@@ -1,0 +1,14 @@
+name: sqllogictest-random-select
+
+description: >
+  Include tests from tests/sqllogictest/test/random/select in the sqllogictest harness runs.
+
+story_points: 2
+
+acceptence_critria:
+  - Harness runs .test files under tests/sqllogictest/test/random/select
+  - All tests under tests/sqllogictest/test/random/select pass
+  - Runs under timeout in CI/local guidance
+
+deppends_on:
+  - 

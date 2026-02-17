@@ -38,6 +38,47 @@ struct JoinPredicate {
     expr: Expr,
 }
 
+fn table_context_for_from<'a>(
+    from: &'a super::parser::FromClause,
+    db: &'a Database,
+) -> Result<TableContext<'a>, EngineError> {
+    let table = db
+        .catalog()
+        .table(&from.table)
+        .ok_or(EngineError::TableNotFound)?;
+    let mut rows = db
+        .scan_table_rows_unlocked(&table.name)?
+        .into_iter()
+        .map(|row| row.values)
+        .collect::<Vec<_>>();
+    if let Some(on_expr) = &from.left_join_on {
+        let condition = eval_left_join_condition(on_expr, db)?;
+        if !condition || rows.is_empty() {
+            rows = vec![vec![Value::Null; table.columns.len()]];
+        }
+    }
+    Ok(TableContext {
+        table,
+        alias: from.alias.as_deref(),
+        rows,
+    })
+}
+
+fn eval_left_join_condition(expr: &Expr, db: &Database) -> Result<bool, EngineError> {
+    let context = EvalContext {
+        db,
+        current: Vec::new(),
+        outer: Vec::new(),
+        subquery_cache: Rc::new(RefCell::new(HashMap::new())),
+        correlation_probe: None,
+    };
+    match eval_expr(expr, &context)? {
+        Value::Boolean(value) => Ok(value),
+        Value::Null => Ok(false),
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
 pub fn execute_select(select: &Select, db: &Database) -> Result<QueryResult, EngineError> {
     let cache = Rc::new(RefCell::new(HashMap::new()));
     execute_select_inner(select, db, Vec::new(), cache, None)
@@ -57,19 +98,7 @@ fn execute_select_inner(
 ) -> Result<QueryResult, EngineError> {
     let mut tables = Vec::new();
     for from in &select.from {
-        let table = db
-            .catalog()
-            .table(&from.table)
-            .ok_or(EngineError::TableNotFound)?;
-        tables.push(TableContext {
-            table,
-            alias: from.alias.as_deref(),
-            rows: db
-                .scan_table_rows_unlocked(&table.name)?
-                .into_iter()
-                .map(|row| row.values)
-                .collect(),
-        });
+        tables.push(table_context_for_from(from, db)?);
     }
 
     let columns = build_columns(select, &tables)?;
@@ -439,21 +468,7 @@ fn execute_exists(
 
     let mut tables = Vec::new();
     for from in &select.from {
-        let table = context
-            .db
-            .catalog()
-            .table(&from.table)
-            .ok_or(EngineError::TableNotFound)?;
-        tables.push(TableContext {
-            table,
-            alias: from.alias.as_deref(),
-            rows: context
-                .db
-                .scan_table_rows_unlocked(&table.name)?
-                .into_iter()
-                .map(|row| row.values)
-                .collect(),
-        });
+        tables.push(table_context_for_from(from, context.db)?);
     }
 
     let table_refs: Vec<TableRef<'_>> = tables
@@ -1628,12 +1643,7 @@ fn eval_expr(expr: &Expr, context: &EvalContext<'_>) -> Result<Value, EngineErro
             let value = eval_expr(expr, context)?;
             let low = eval_expr(low, context)?;
             let high = eval_expr(high, context)?;
-            if matches!(value, Value::Null) || matches!(low, Value::Null) || matches!(high, Value::Null) {
-                return Ok(Value::Null);
-            }
-            let between = value_cmp(&value, &low) != Ordering::Less
-                && value_cmp(&value, &high) != Ordering::Greater;
-            Ok(Value::Boolean(if *negated { !between } else { between }))
+            eval_between_values(value, low, high, *negated)
         }
         Expr::InList {
             expr,
@@ -1842,15 +1852,7 @@ fn eval_expr_group(
             let value = eval_expr_group(expr, context, aggregates)?;
             let low = eval_expr_group(low, context, aggregates)?;
             let high = eval_expr_group(high, context, aggregates)?;
-            if matches!(value, Value::Null)
-                || matches!(low, Value::Null)
-                || matches!(high, Value::Null)
-            {
-                return Ok(Value::Null);
-            }
-            let between = value_cmp(&value, &low) != Ordering::Less
-                && value_cmp(&value, &high) != Ordering::Greater;
-            Ok(Value::Boolean(if *negated { !between } else { between }))
+            eval_between_values(value, low, high, *negated)
         }
         Expr::InList {
             expr,
@@ -2123,6 +2125,26 @@ fn eval_binary(op: &BinaryOp, left: Value, right: Value) -> Result<Value, Engine
     }
 }
 
+fn eval_between_values(
+    value: Value,
+    low: Value,
+    high: Value,
+    negated: bool,
+) -> Result<Value, EngineError> {
+    let lower = compare_with_nulls(value.clone(), low, |l, r| {
+        Value::Boolean(value_cmp(&l, &r) != Ordering::Less)
+    })?;
+    let upper = compare_with_nulls(value, high, |l, r| {
+        Value::Boolean(value_cmp(&l, &r) != Ordering::Greater)
+    })?;
+    let between = three_valued_and(lower, upper)?;
+    match between {
+        Value::Boolean(value) => Ok(Value::Boolean(if negated { !value } else { value })),
+        Value::Null => Ok(Value::Null),
+        _ => Err(EngineError::InvalidSql),
+    }
+}
+
 fn value_to_bool(value: &Value) -> Result<bool, EngineError> {
     match value {
         Value::Boolean(value) => Ok(*value),
@@ -2271,29 +2293,25 @@ fn numeric_div(left: Value, right: Value) -> Result<Value, EngineError> {
         (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         (Value::Integer(a), Value::Integer(b)) => {
             if b == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
-            if a % b == 0 {
-                Ok(Value::Integer(a / b))
-            } else {
-                Ok(Value::Real(a as f64 / b as f64))
-            }
+            Ok(Value::Integer(a / b))
         }
         (Value::Integer(a), Value::Real(b)) => {
             if b == 0.0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Real(a as f64 / b))
         }
         (Value::Real(a), Value::Integer(b)) => {
             if b == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Real(a / b as f64))
         }
         (Value::Real(a), Value::Real(b)) => {
             if b == 0.0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Real(a / b))
         }
@@ -2306,27 +2324,27 @@ fn numeric_div_int(left: Value, right: Value) -> Result<Value, EngineError> {
         (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         (Value::Integer(a), Value::Integer(b)) => {
             if b == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Integer(a / b))
         }
         (Value::Integer(a), Value::Real(b)) => {
             let b_int = b.trunc() as i64;
             if b_int == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Integer(a / b_int))
         }
         (Value::Real(a), Value::Integer(b)) => {
             if b == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Integer(a.trunc() as i64 / b))
         }
         (Value::Real(a), Value::Real(b)) => {
             let b_int = b.trunc() as i64;
             if b_int == 0 {
-                return Err(EngineError::InvalidSql);
+                return Ok(Value::Null);
             }
             Ok(Value::Integer(a.trunc() as i64 / b_int))
         }
@@ -2395,7 +2413,15 @@ fn expr_result_type(expr: &Expr, tables: &[TableContext<'_>]) -> Result<SqlType,
                     Ok(SqlType::Integer)
                 }
             }
-            BinaryOp::Div => Ok(SqlType::Real),
+            BinaryOp::Div => {
+                let left = expr_result_type(left, tables)?;
+                let right = expr_result_type(right, tables)?;
+                if left == SqlType::Real || right == SqlType::Real {
+                    Ok(SqlType::Real)
+                } else {
+                    Ok(SqlType::Integer)
+                }
+            }
             BinaryOp::DivInt => Ok(SqlType::Integer),
         },
         Expr::Between { .. } => Ok(SqlType::Boolean),
@@ -2722,7 +2748,7 @@ mod tests {
     }
 
     #[test]
-    fn division_by_zero_returns_error() {
+    fn division_by_zero_returns_null() {
         let path = temp_db_path("division_by_zero");
         let db = Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
         let context = EvalContext {
@@ -2738,14 +2764,68 @@ mod tests {
             op: BinaryOp::Div,
             right: Box::new(Expr::Literal(Literal::Number("0".to_string()))),
         };
-        assert!(eval_expr(&expr, &context).is_err());
+        let value = eval_expr(&expr, &context).expect("eval");
+        assert_eq!(value, Value::Null);
 
         let expr = Expr::Binary {
             left: Box::new(Expr::Literal(Literal::Number("10.0".to_string()))),
             op: BinaryOp::Div,
             right: Box::new(Expr::Literal(Literal::Number("0.0".to_string()))),
         };
-        assert!(eval_expr(&expr, &context).is_err());
+        let value = eval_expr(&expr, &context).expect("eval");
+        assert_eq!(value, Value::Null);
+    }
+
+    #[test]
+    fn between_with_null_bounds_uses_three_valued_logic() {
+        let path = temp_db_path("between_null_bounds");
+        let db = Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        let context = EvalContext {
+            db: &db,
+            current: Vec::new(),
+            outer: Vec::new(),
+            subquery_cache: Rc::new(RefCell::new(HashMap::new())),
+            correlation_probe: None,
+        };
+
+        let expr = Expr::Between {
+            expr: Box::new(Expr::Literal(Literal::Number("2".to_string()))),
+            low: Box::new(Expr::Literal(Literal::Null)),
+            high: Box::new(Expr::Literal(Literal::Number("1".to_string()))),
+            negated: false,
+        };
+        let value = eval_expr(&expr, &context).expect("eval");
+        assert_eq!(value, Value::Boolean(false));
+
+        let expr = Expr::Between {
+            expr: Box::new(Expr::Literal(Literal::Number("2".to_string()))),
+            low: Box::new(Expr::Literal(Literal::Null)),
+            high: Box::new(Expr::Literal(Literal::Number("3".to_string()))),
+            negated: false,
+        };
+        let value = eval_expr(&expr, &context).expect("eval");
+        assert_eq!(value, Value::Null);
+    }
+
+    #[test]
+    fn integer_division_truncates_toward_zero() {
+        let path = temp_db_path("integer_division");
+        let db = Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        let context = EvalContext {
+            db: &db,
+            current: Vec::new(),
+            outer: Vec::new(),
+            subquery_cache: Rc::new(RefCell::new(HashMap::new())),
+            correlation_probe: None,
+        };
+
+        let expr = Expr::Binary {
+            left: Box::new(Expr::Literal(Literal::Number("20".to_string()))),
+            op: BinaryOp::Div,
+            right: Box::new(Expr::Literal(Literal::Number("-97".to_string()))),
+        };
+        let value = eval_expr(&expr, &context).expect("eval");
+        assert_eq!(value, Value::Integer(0));
     }
 
     #[test]

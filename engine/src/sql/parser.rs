@@ -98,6 +98,7 @@ pub enum SetOp {
 pub struct FromClause {
     pub table: String,
     pub alias: Option<String>,
+    pub left_join_on: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,7 +405,13 @@ fn parse_select_body(stream: &mut TokenStream) -> Result<Select, ParseError> {
             if let Some(wildcard) = parse_qualified_wildcard(stream)? {
                 items.push(SelectItem::Wildcard(Some(wildcard)));
             } else {
-                items.push(SelectItem::Expr(parse_expr(stream)?));
+                let expr = parse_expr(stream)?;
+                if stream.consume_keyword(Keyword::As) {
+                    stream.expect_identifier()?;
+                } else if stream.consume_identifier().is_some() {
+                    // Optional alias without AS; ignore the name for now.
+                }
+                items.push(SelectItem::Expr(expr));
             }
 
             if stream.consume_symbol(Symbol::Comma) {
@@ -415,8 +422,10 @@ fn parse_select_body(stream: &mut TokenStream) -> Result<Select, ParseError> {
     }
 
     let mut from = Vec::new();
+    let mut join_filter: Option<Expr> = None;
     if stream.consume_keyword(Keyword::From) {
-        loop {
+        let parenthesized = stream.consume_symbol(Symbol::LParen);
+        let mut parse_table = |stream: &mut TokenStream| -> Result<FromClause, ParseError> {
             let table = stream.expect_identifier()?;
             let alias = if stream.consume_keyword(Keyword::As) {
                 Some(stream.expect_identifier()?)
@@ -425,24 +434,80 @@ fn parse_select_body(stream: &mut TokenStream) -> Result<Select, ParseError> {
             } else {
                 None
             };
-            from.push(FromClause { table, alias });
+            Ok(FromClause {
+                table,
+                alias,
+                left_join_on: None,
+            })
+        };
 
+        from.push(parse_table(stream)?);
+        loop {
             if stream.consume_symbol(Symbol::Comma) {
+                from.push(parse_table(stream)?);
                 continue;
             }
             if stream.consume_keyword(Keyword::Cross) {
                 stream.expect_keyword(Keyword::Join)?;
+                from.push(parse_table(stream)?);
                 continue;
             }
-            break;
+            if stream.consume_keyword(Keyword::Left) {
+                stream.consume_keyword(Keyword::Outer);
+                stream.expect_keyword(Keyword::Join)?;
+                let mut clause = parse_table(stream)?;
+                if !stream.consume_keyword(Keyword::On) {
+                    return Err(stream.error("expected ON clause for LEFT JOIN", None));
+                }
+                clause.left_join_on = Some(parse_expr(stream)?);
+                from.push(clause);
+                continue;
+            }
+            let saw_join = if stream.consume_keyword(Keyword::Inner) {
+                stream.expect_keyword(Keyword::Join)?;
+                true
+            } else {
+                stream.consume_keyword(Keyword::Join)
+            };
+            if !saw_join {
+                break;
+            }
+            from.push(parse_table(stream)?);
+            if !stream.consume_keyword(Keyword::On) {
+                return Err(stream.error("expected ON clause for JOIN", None));
+            }
+            let on_expr = parse_expr(stream)?;
+            join_filter = Some(if let Some(existing) = join_filter {
+                Expr::Binary {
+                    left: Box::new(existing),
+                    op: BinaryOp::And,
+                    right: Box::new(on_expr),
+                }
+            } else {
+                on_expr
+            });
+        }
+        if parenthesized {
+            stream.expect_symbol(Symbol::RParen)?;
         }
     }
 
-    let filter = if stream.consume_keyword(Keyword::Where) {
+    let mut filter = if stream.consume_keyword(Keyword::Where) {
         Some(parse_expr(stream)?)
     } else {
         None
     };
+    if let Some(join_filter) = join_filter {
+        filter = Some(if let Some(existing) = filter {
+            Expr::Binary {
+                left: Box::new(join_filter),
+                op: BinaryOp::And,
+                right: Box::new(existing),
+            }
+        } else {
+            join_filter
+        });
+    }
 
     let mut group_by = Vec::new();
     if stream.consume_keyword(Keyword::Group) {
