@@ -1,0 +1,15 @@
+name: free-list-management
+description: >
+  Add a free list (or equivalent) to recycle deallocated pages for future
+  allocations.
+
+story_points: 5
+
+acceptence_critria:
+  - Deallocated pages are tracked in a free list
+  - Allocator can reuse freed pages
+  - Free list survives restart via on-disk storage
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00005

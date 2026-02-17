@@ -1,0 +1,15 @@
+name: openapi-spec
+description: >
+  Expose an OpenAPI specification for the REST API at a fixed endpoint.
+
+story_points: 3
+
+acceptence_critria:
+  - OpenAPI JSON served at documented endpoint
+  - Spec includes /execute request/response
+  - Spec includes error schema
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00020
+  - task_00021

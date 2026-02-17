@@ -1,0 +1,14 @@
+name: cli-config-flags
+description: >
+  Implement CLI configuration and flags, including server address selection.
+
+story_points: 2
+
+acceptence_critria:
+  - CLI accepts server URL flag or env
+  - CLI help/usage includes new flags
+  - Default server address is defined
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00001

@@ -1,0 +1,15 @@
+name: page-allocator
+description: >
+  Implement page allocation and deallocation on top of the storage file, using
+  the page layout spec.
+
+story_points: 5
+
+acceptence_critria:
+  - New pages can be allocated and persisted
+  - Allocated pages are addressable by page id
+  - Allocator integrates with file IO layer
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00004

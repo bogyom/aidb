@@ -1,0 +1,15 @@
+name: row-record-layout
+description: >
+  Define the binary row record layout for heap pages, including column value
+  encoding for MVP types.
+
+story_points: 3
+
+acceptence_critria:
+  - Row record format defined and documented
+  - Encoding supports MVP value types
+  - Row size calculation or metadata included as needed
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00004

@@ -1,0 +1,15 @@
+name: sqllogictest-harness
+description: >
+  Wire sqllogictest-rs to run against the engine and execute test files from the
+  vendored suite.
+
+story_points: 5
+
+acceptence_critria:
+  - sqllogictest-rs can run test files
+  - Harness executes tests against engine
+  - Test runner is callable via cargo
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00002

@@ -1,0 +1,15 @@
+name: catalog-schema-model
+description: >
+  Define in-memory schema representations for tables and columns, including
+  types required by the MVP SQL subset.
+
+story_points: 3
+
+acceptence_critria:
+  - Table and column structs defined with required fields
+  - Supported SQL types for MVP documented
+  - Catalog model is usable by planner/executor
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00002

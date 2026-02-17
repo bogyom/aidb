@@ -1,0 +1,15 @@
+name: cli-output-table
+description: >
+  Add tabular output formatting for query results with column headers and
+  aligned values.
+
+story_points: 3
+
+acceptence_critria:
+  - Results render in a readable table
+  - Column headers included
+  - Empty result sets render sensibly
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00026

@@ -1,0 +1,16 @@
+name: planner-scan-filter
+description: >
+  Create a minimal planner to build execution plans for full table scans with
+  simple filters and ordering.
+
+story_points: 5
+
+acceptence_critria:
+  - Planner builds scan + filter plan nodes
+  - Planner resolves columns using catalog
+  - Planner output consumed by executor
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00014
+  - task_00007

@@ -1,0 +1,18 @@
+name: select1-test-pass
+description: >
+  Ensure the engine passes select1.test from the sqllogictest suite for the MVP
+  subset.
+
+story_points: 8
+
+acceptence_critria:
+  - select1.test runs without failures
+  - No known exclusions for select1.test
+  - Results match expected outputs
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00029
+  - task_00016
+  - task_00017
+  - task_00008

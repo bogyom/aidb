@@ -1,0 +1,13 @@
+name: sql-lexer
+description: >
+  Implement a minimal SQL lexer to tokenize the MVP SQL subset.
+
+story_points: 3
+
+acceptence_critria:
+  - Lexer tokenizes identifiers, literals, keywords, and symbols
+  - Unit tests for basic tokenization cases
+  - Lexer integrated into parser entrypoint
+
+deppends_on:
+  - task_00002

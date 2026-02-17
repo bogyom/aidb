@@ -1,0 +1,14 @@
+name: swagger-ui-endpoint
+description: >
+  Serve Swagger UI pointing to the OpenAPI spec endpoint.
+
+story_points: 2
+
+acceptence_critria:
+  - Swagger UI available at documented endpoint
+  - UI loads OpenAPI spec successfully
+  - Basic API calls are possible from UI
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00023

@@ -1,0 +1,13 @@
+name: rest-error-mapping
+description: >
+  Map engine error types into consistent HTTP status codes and error payloads.
+
+story_points: 2
+
+acceptence_critria:
+  - Engine errors mapped to HTTP status codes
+  - Error payload schema is stable
+  - Mapping is covered by unit tests
+
+deppends_on:
+  - task_00021

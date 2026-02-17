@@ -1,0 +1,16 @@
+name: heap-page-reader
+description: >
+  Implement scanning and reading row records from heap pages, decoding them into
+  logical rows.
+
+story_points: 5
+
+acceptence_critria:
+  - Rows can be scanned from heap pages
+  - Row decoding matches record layout
+  - Reader handles empty and partially filled pages
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00009
+  - task_00005

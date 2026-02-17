@@ -1,0 +1,15 @@
+name: concurrency-gate
+description: >
+  Add a single-writer concurrency guard around engine operations to block
+  readers during writes.
+
+story_points: 3
+
+acceptence_critria:
+  - Concurrent calls are synchronized safely
+  - Write operations block reads as required
+  - Concurrency policy documented in code
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00002

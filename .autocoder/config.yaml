@@ -1,0 +1,12 @@
+phase_retries: 3
+codex_cli: codex
+codex_args:
+- --search
+- --dangerously-bypass-approvals-and-sandbox
+- --model
+- gpt-5.2-codex
+- -c
+- model_reasoning_effort="high"
+- exec
+log_dir: .autocoder/logs
+trace_dir: .autocoder/traces

@@ -1,0 +1,15 @@
+name: rest-server-skeleton
+description: >
+  Create the REST server crate with routing, request parsing, and basic app
+  state wiring to the engine.
+
+story_points: 3
+
+acceptence_critria:
+  - Server binary starts and listens on a port
+  - Routing framework is set up
+  - Engine instance is wired into server state
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00002

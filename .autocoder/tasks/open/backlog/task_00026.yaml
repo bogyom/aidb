@@ -1,0 +1,16 @@
+name: cli-one-shot
+description: >
+  Implement CLI non-interactive mode to send a single SQL statement to the REST
+  service and print results.
+
+story_points: 3
+
+acceptence_critria:
+  - CLI executes a single SQL statement via REST
+  - Exit code indicates success or failure
+  - Errors are printed with useful context
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00025
+  - task_00021

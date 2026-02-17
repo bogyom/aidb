@@ -1,0 +1,17 @@
+name: executor-insert
+description: >
+  Implement execution of INSERT statements to write rows into heap pages and
+  update catalog if needed.
+
+story_points: 5
+
+acceptence_critria:
+  - INSERT adds rows to heap storage
+  - INSERT validates target table and columns
+  - INSERT errors are surfaced on invalid input
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00015
+  - task_00010
+  - task_00008

@@ -1,0 +1,19 @@
+name: rest-execute-endpoint
+description: >
+  Implement POST /execute to run SQL and return JSON results or errors via the
+  engine.
+
+story_points: 5
+
+acceptence_critria:
+  - POST /execute accepts SQL payload
+  - Successful queries return JSON rows
+  - Errors return JSON with message and status
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00020
+  - task_00019
+  - task_00016
+  - task_00017
+  - task_00018

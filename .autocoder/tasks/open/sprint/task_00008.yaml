@@ -1,0 +1,17 @@
+name: catalog-on-disk-persistence
+description: >
+  Persist catalog metadata in the database file and load it on startup to
+  restore schema definitions.
+
+story_points: 8
+
+acceptence_critria:
+  - Catalog written to disk on CREATE/DROP
+  - Catalog loaded on open
+  - Schema survives restart and is consistent
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00003
+  - task_00007
+  - task_00005

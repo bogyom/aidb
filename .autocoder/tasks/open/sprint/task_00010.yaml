@@ -1,0 +1,16 @@
+name: heap-page-writer
+description: >
+  Implement insertion of row records into heap pages with free space management
+  and overflow handling policy.
+
+story_points: 5
+
+acceptence_critria:
+  - Rows can be written to heap pages
+  - Free space tracked for heap pages
+  - Heap page updates are persisted
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00009
+  - task_00005

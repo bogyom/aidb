@@ -1,0 +1,15 @@
+name: result-set-shaping
+description: >
+  Define and implement the result set structure returned by the engine,
+  including column metadata and row values.
+
+story_points: 3
+
+acceptence_critria:
+  - Result set includes column names and types
+  - Rows represented in a stable order
+  - Result set convertible to JSON response
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00016

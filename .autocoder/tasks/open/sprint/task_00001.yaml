@@ -1,0 +1,15 @@
+name: workspace-scaffolding
+description: >
+  Initialize a Rust workspace layout for engine, server, and CLI crates. Set up
+  baseline Cargo workspace structure and repo conventions needed for the MVP
+  build.
+
+story_points: 2
+
+acceptence_critria:
+  - Cargo workspace builds with empty crates
+  - Engine, server, and CLI crates are present in the workspace
+  - Basic README or root documentation updated to describe crates
+
+  - Unit tests added for this task
+deppends_on: []

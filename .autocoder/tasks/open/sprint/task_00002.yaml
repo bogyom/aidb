@@ -1,0 +1,15 @@
+name: engine-crate-skeleton
+description: >
+  Create the core engine crate with public API boundaries for open/create DB,
+  execute SQL, and return result sets or errors.
+
+story_points: 3
+
+acceptence_critria:
+  - Engine crate compiles with public API stubs
+  - Public API includes open/create, execute, and close or drop semantics
+  - Core error type defined for engine use
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00001

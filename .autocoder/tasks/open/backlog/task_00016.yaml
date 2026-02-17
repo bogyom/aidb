@@ -1,0 +1,16 @@
+name: executor-scan-filter
+description: >
+  Implement execution for scan + filter plans, returning result rows in logical
+  order for MVP subset.
+
+story_points: 8
+
+acceptence_critria:
+  - Executor can scan heap pages and apply filters
+  - SELECT returns correct rows for simple predicates
+  - Ordering and LIMIT honored for single column
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00015
+  - task_00011

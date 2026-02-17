@@ -1,0 +1,15 @@
+name: cli-repl
+description: >
+  Implement interactive REPL mode with multiline input and semicolon terminator.
+
+story_points: 5
+
+acceptence_critria:
+  - REPL supports multiline SQL ending with ;
+  - Each statement is executed via REST
+  - REPL prints results or errors per statement
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00025
+  - task_00021

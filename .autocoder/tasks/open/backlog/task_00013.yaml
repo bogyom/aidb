@@ -1,0 +1,15 @@
+name: sql-parser-subset
+description: >
+  Implement a parser for the MVP SQL subset (CREATE TABLE, DROP TABLE, INSERT,
+  SELECT with simple WHERE, LIMIT, ORDER BY).
+
+story_points: 8
+
+acceptence_critria:
+  - Parser builds AST for MVP statements
+  - Parser handles basic expressions and predicates
+  - Parser errors are surfaced cleanly
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00012
