@@ -1,0 +1,14 @@
+name: executor-subquery-scalar
+description: >
+  Execute scalar subqueries with correlation support.
+
+story_points: 3
+
+acceptence_critria:
+  - Scalar subqueries evaluate per outer row
+  - Uncorrelated scalar subqueries are cached or evaluated once
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00040
+  - task_00041

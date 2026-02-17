@@ -1,0 +1,14 @@
+name: planner-aggregate-detect
+description: >
+  Detect COUNT(*) and AVG(expr) aggregates and plan them.
+
+story_points: 3
+
+acceptence_critria:
+  - Planner distinguishes aggregate projections from scalar expressions
+  - COUNT(*) and AVG(expr) are accepted in select2/select3
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00033
+  - task_00038

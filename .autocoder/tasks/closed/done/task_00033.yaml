@@ -1,0 +1,13 @@
+name: planner-expr-variants
+description: >
+  Extend expression planning to support new expression variants used by select2/select3.
+
+story_points: 3
+
+acceptence_critria:
+  - ExprPlan covers comparisons, arithmetic, between, case, functions, subqueries, and is-null
+  - Planner compiles all select2/select3 expressions without unsupported errors
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00032

@@ -1,0 +1,13 @@
+name: planner-compare-ops
+description: >
+  Plan comparison operators (=, <>, <, <=, >, >=) into executable expression nodes.
+
+story_points: 2
+
+acceptence_critria:
+  - Comparison operators are planned with correct operand types
+  - Planner rejects unsupported comparisons with clear errors
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00033

@@ -1,0 +1,15 @@
+name: executor-between-isnull
+description: >
+  Execute BETWEEN/NOT BETWEEN and IS NULL/IS NOT NULL.
+
+story_points: 2
+
+acceptence_critria:
+  - BETWEEN uses inclusive bounds and respects NULL semantics
+  - IS NULL / IS NOT NULL return boolean values
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00036
+  - task_00032
+  - task_00041

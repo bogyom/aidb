@@ -1,0 +1,13 @@
+name: executor-aggregate-count
+description: >
+  Execute COUNT(*) aggregation.
+
+story_points: 3
+
+acceptence_critria:
+  - COUNT(*) returns total row count
+  - COUNT works in scalar subqueries
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00039

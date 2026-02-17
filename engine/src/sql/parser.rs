@@ -80,6 +80,7 @@ pub enum Expr {
     Literal(Literal),
     Unary { op: UnaryOp, expr: Box<Expr> },
     Binary { left: Box<Expr>, op: BinaryOp, right: Box<Expr> },
+    IsNull { expr: Box<Expr>, negated: bool },
     Between {
         expr: Box<Expr>,
         low: Box<Expr>,
@@ -414,6 +415,18 @@ fn parse_not(stream: &mut TokenStream) -> Result<Expr, ParseError> {
 
 fn parse_comparison(stream: &mut TokenStream) -> Result<Expr, ParseError> {
     let expr = parse_additive(stream)?;
+
+    if stream.consume_keyword(Keyword::Is) {
+        let negated = stream.consume_keyword(Keyword::Not);
+        let literal = stream.expect_literal()?;
+        if literal != Literal::Null {
+            return Err(stream.error("expected NULL", stream.last_span_start()));
+        }
+        return Ok(Expr::IsNull {
+            expr: Box::new(expr),
+            negated,
+        });
+    }
 
     let negated = if stream.consume_keyword(Keyword::Not) {
         stream.expect_keyword(Keyword::Between)?;
@@ -798,6 +811,38 @@ mod tests {
         match &statements[0] {
             Statement::DropTable(stmt) => assert_eq!(stmt.name, "users"),
             _ => panic!("expected drop table"),
+        }
+    }
+
+    #[test]
+    fn parse_is_null_expressions() {
+        let statements =
+            parse("SELECT id IS NULL FROM users WHERE name IS NOT NULL").expect("parse");
+        match &statements[0] {
+            Statement::Select(stmt) => {
+                assert_eq!(stmt.items.len(), 1);
+                match &stmt.items[0] {
+                    SelectItem::Expr(Expr::IsNull { expr, negated }) => {
+                        assert!(!negated);
+                        assert!(matches!(
+                            &**expr,
+                            Expr::Identifier(parts) if parts == &vec!["id".to_string()]
+                        ));
+                    }
+                    _ => panic!("expected IS NULL expression"),
+                }
+                match stmt.filter.as_ref() {
+                    Some(Expr::IsNull { expr, negated }) => {
+                        assert!(*negated);
+                        assert!(matches!(
+                            &**expr,
+                            Expr::Identifier(parts) if parts == &vec!["name".to_string()]
+                        ));
+                    }
+                    _ => panic!("expected IS NOT NULL filter"),
+                }
+            }
+            _ => panic!("expected select"),
         }
     }
 

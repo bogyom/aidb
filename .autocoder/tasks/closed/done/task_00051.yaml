@@ -1,0 +1,13 @@
+name: planner-orderby-ordinal
+description: >
+  Resolve ORDER BY ordinal positions to select items.
+
+story_points: 2
+
+acceptence_critria:
+  - ORDER BY 1 refers to the first select item
+  - Out-of-range ordinals produce a planning error
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00050

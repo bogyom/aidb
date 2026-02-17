@@ -3,7 +3,10 @@ use super::parser::{
     BinaryOp, Expr, FunctionArg, OrderBy, OrderDirection, Select, SelectItem, UnaryOp,
 };
 use crate::{ColumnMeta, Database, EngineError, QueryResult, SqlType, TableSchema, Value};
+use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Clone, Copy)]
 struct RowContext<'a> {
@@ -12,21 +15,26 @@ struct RowContext<'a> {
     row: &'a [Value],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct EvalContext<'a> {
     db: &'a Database,
     current: Option<RowContext<'a>>,
     outer: Option<RowContext<'a>>,
+    subquery_cache: Rc<RefCell<HashMap<usize, Value>>>,
+    correlation_probe: Option<Rc<RefCell<bool>>>,
 }
 
 pub fn execute_select(select: &Select, db: &Database) -> Result<QueryResult, EngineError> {
-    execute_select_inner(select, db, None)
+    let cache = Rc::new(RefCell::new(HashMap::new()));
+    execute_select_inner(select, db, None, cache, None)
 }
 
 fn execute_select_inner(
     select: &Select,
     db: &Database,
     outer: Option<RowContext<'_>>,
+    subquery_cache: Rc<RefCell<HashMap<usize, Value>>>,
+    correlation_probe: Option<Rc<RefCell<bool>>>,
 ) -> Result<QueryResult, EngineError> {
     let (table, alias) = match &select.from {
         Some(from) => (
@@ -56,6 +64,8 @@ fn execute_select_inner(
             db,
             current: None,
             outer,
+            subquery_cache: subquery_cache.clone(),
+            correlation_probe: correlation_probe.clone(),
         };
         let aggregated = evaluate_aggregates(select, table, alias, &rows, &mut context)?;
         return Ok(QueryResult {
@@ -81,7 +91,13 @@ fn execute_select_inner(
             alias,
             row,
         });
-        let context = EvalContext { db, current, outer };
+        let context = EvalContext {
+            db,
+            current,
+            outer,
+            subquery_cache: subquery_cache.clone(),
+            correlation_probe: correlation_probe.clone(),
+        };
 
         if let Some(filter) = &select.filter {
             if !eval_predicate(filter, &context)? {
@@ -189,6 +205,8 @@ fn evaluate_aggregates(
             db: context.db,
             current,
             outer: context.outer,
+            subquery_cache: context.subquery_cache.clone(),
+            correlation_probe: context.correlation_probe.clone(),
         };
 
         if let Some(filter) = &select.filter {
@@ -353,6 +371,11 @@ fn eval_expr(expr: &Expr, context: &EvalContext<'_>) -> Result<Value, EngineErro
             let right = eval_expr(right, context)?;
             eval_binary(op, left, right)
         }
+        Expr::IsNull { expr, negated } => {
+            let value = eval_expr(expr, context)?;
+            let is_null = matches!(value, Value::Null);
+            Ok(Value::Boolean(if *negated { !is_null } else { is_null }))
+        }
         Expr::Between {
             expr,
             low,
@@ -417,11 +440,33 @@ fn eval_expr(expr: &Expr, context: &EvalContext<'_>) -> Result<Value, EngineErro
             }
         }
         Expr::Subquery(select) => {
-            let result = execute_select_inner(select, context.db, context.current)?;
-            scalar_from_query(result)
+            let key = select.as_ref() as *const Select as usize;
+            if let Some(value) = context.subquery_cache.borrow().get(&key) {
+                return Ok(value.clone());
+            }
+
+            let probe = Rc::new(RefCell::new(false));
+            let result = execute_select_inner(
+                select,
+                context.db,
+                context.current,
+                context.subquery_cache.clone(),
+                Some(probe.clone()),
+            )?;
+            let value = scalar_from_query(result)?;
+            if !*probe.borrow() {
+                context.subquery_cache.borrow_mut().insert(key, value.clone());
+            }
+            Ok(value)
         }
         Expr::Exists(select) => {
-            let result = execute_select_inner(select, context.db, context.current)?;
+            let result = execute_select_inner(
+                select,
+                context.db,
+                context.current,
+                context.subquery_cache.clone(),
+                None,
+            )?;
             Ok(Value::Boolean(!result.rows.is_empty()))
         }
     }
@@ -447,6 +492,7 @@ fn resolve_identifier(
             }
             if let Some(outer) = context.outer {
                 if let Some(value) = column_value(outer, column) {
+                    mark_correlated(context);
                     return Ok(value);
                 }
             }
@@ -463,6 +509,7 @@ fn resolve_identifier(
             if let Some(outer) = context.outer {
                 if matches_table(table_name, outer) {
                     if let Some(value) = column_value(outer, column) {
+                        mark_correlated(context);
                         return Ok(value);
                     }
                 }
@@ -470,6 +517,12 @@ fn resolve_identifier(
             Err(EngineError::InvalidSql)
         }
         _ => Err(EngineError::InvalidSql),
+    }
+}
+
+fn mark_correlated(context: &EvalContext<'_>) {
+    if let Some(probe) = &context.correlation_probe {
+        *probe.borrow_mut() = true;
     }
 }
 
@@ -665,6 +718,7 @@ fn expr_result_type(expr: &Expr, table: Option<&TableSchema>) -> Result<SqlType,
             BinaryOp::Div => Ok(SqlType::Real),
         },
         Expr::Between { .. } => Ok(SqlType::Boolean),
+        Expr::IsNull { .. } => Ok(SqlType::Boolean),
         Expr::Case { when_thens, else_expr, .. } => {
             if let Some((_, then_expr)) = when_thens.first() {
                 expr_result_type(then_expr, table)
@@ -767,5 +821,65 @@ fn value_rank(value: &Value) -> u8 {
         Value::Text(_) => 2,
         Value::Boolean(_) => 3,
         Value::Null => 4,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sql::parser::{parse, Statement};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_db_path(label: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        path.push(format!("aidb_{label}_{nanos}.db"));
+        path
+    }
+
+    #[test]
+    fn uncorrelated_scalar_subquery_uses_cached_value() {
+        let path = temp_db_path("uncorrelated_scalar_subquery_cache");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO users (id) VALUES (1)")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id) VALUES (2)")
+            .expect("insert row");
+
+        let statements =
+            parse("SELECT (SELECT COUNT(*) FROM users) FROM users").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select statement"),
+        };
+        let subquery = match &select.items[0] {
+            SelectItem::Expr(Expr::Subquery(subquery)) => subquery,
+            _ => panic!("expected scalar subquery"),
+        };
+
+        let cache = Rc::new(RefCell::new(HashMap::new()));
+        let key = subquery.as_ref() as *const Select as usize;
+        cache
+            .borrow_mut()
+            .insert(key, Value::Integer(42));
+
+        let result = execute_select_inner(select, &db, None, cache, None).expect("select");
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(42)],
+                vec![Value::Integer(42)],
+            ]
+        );
     }
 }

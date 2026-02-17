@@ -38,6 +38,7 @@ pub enum Keyword {
     And,
     Or,
     Not,
+    Is,
     Between,
     Case,
     When,
@@ -386,6 +387,7 @@ fn keyword_or_literal(ident: &str) -> KeywordOrLiteral {
         "AND" => KeywordOrLiteral::Keyword(Keyword::And),
         "OR" => KeywordOrLiteral::Keyword(Keyword::Or),
         "NOT" => KeywordOrLiteral::Keyword(Keyword::Not),
+        "IS" => KeywordOrLiteral::Keyword(Keyword::Is),
         "BETWEEN" => KeywordOrLiteral::Keyword(Keyword::Between),
         "CASE" => KeywordOrLiteral::Keyword(Keyword::Case),
         "WHEN" => KeywordOrLiteral::Keyword(Keyword::When),
@@ -448,6 +450,18 @@ mod tests {
             TokenKind::Symbol(Symbol::Comma),
             TokenKind::Literal(Literal::Null),
             TokenKind::Symbol(Symbol::RParen),
+        ];
+
+        assert_eq!(kinds(&tokens), expected);
+    }
+
+    #[test]
+    fn lexes_is_keyword() {
+        let tokens = lex("col IS NULL").expect("lex");
+        let expected = vec![
+            TokenKind::Identifier("col".to_string()),
+            TokenKind::Keyword(Keyword::Is),
+            TokenKind::Literal(Literal::Null),
         ];
 
         assert_eq!(kinds(&tokens), expected);

@@ -1,0 +1,14 @@
+name: executor-case
+description: >
+  Evaluate searched and simple CASE expressions.
+
+story_points: 2
+
+acceptence_critria:
+  - CASE returns first matching THEN value
+  - CASE handles ELSE and NULL conditions correctly
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00037
+  - task_00041

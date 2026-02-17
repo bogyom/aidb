@@ -192,6 +192,7 @@ fn validate_expr(
             validate_expr(left, table, alias)?;
             validate_expr(right, table, alias)
         }
+        Expr::IsNull { expr, .. } => validate_expr(expr, table, alias),
         Expr::Between {
             expr,
             low,
@@ -279,6 +280,7 @@ fn expr_contains_identifier(expr: &Expr) -> bool {
         Expr::Binary { left, right, .. } => {
             expr_contains_identifier(left) || expr_contains_identifier(right)
         }
+        Expr::IsNull { expr, .. } => expr_contains_identifier(expr),
         Expr::Between { expr, low, high, .. } => {
             expr_contains_identifier(expr)
                 || expr_contains_identifier(low)

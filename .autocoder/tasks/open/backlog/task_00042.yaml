@@ -1,0 +1,14 @@
+name: executor-arithmetic
+description: >
+  Evaluate arithmetic expressions with NULL propagation.
+
+story_points: 2
+
+acceptence_critria:
+  - Arithmetic on NULL yields NULL
+  - Division by zero yields an error or NULL per design
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00035
+  - task_00041

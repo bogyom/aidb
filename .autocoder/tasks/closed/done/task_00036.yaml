@@ -1,0 +1,13 @@
+name: planner-between-expr
+description: >
+  Plan BETWEEN and NOT BETWEEN expressions into expression nodes.
+
+story_points: 2
+
+acceptence_critria:
+  - BETWEEN expressions are represented in ExprPlan
+  - NOT BETWEEN is supported
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00033

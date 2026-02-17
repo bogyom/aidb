@@ -1,0 +1,14 @@
+name: executor-orderby-multikey
+description: >
+  Sort result sets by multiple ORDER BY keys.
+
+story_points: 2
+
+acceptence_critria:
+  - Rows are sorted by all ORDER BY keys
+  - Ordering respects ASC/DESC per key
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00050
+  - task_00051

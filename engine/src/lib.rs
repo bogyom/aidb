@@ -1184,6 +1184,125 @@ mod tests {
     }
 
     #[test]
+    fn execute_count_star_returns_total_rows() {
+        let path = temp_db_path("execute_count_star");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER, name TEXT)")
+            .expect("create table");
+        db.execute("INSERT INTO users (id, name) VALUES (1, 'Ada')")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id, name) VALUES (2, 'Bob')")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id, name) VALUES (3, 'Cal')")
+            .expect("insert row");
+
+        let result = db.execute("SELECT COUNT(*) FROM users").expect("select");
+        assert_eq!(
+            result.columns,
+            vec![ColumnMeta::new("expr", SqlType::Integer)]
+        );
+        assert_eq!(result.rows, vec![vec![Value::Integer(3)]]);
+    }
+
+    #[test]
+    fn execute_count_in_scalar_subquery() {
+        let path = temp_db_path("execute_count_subquery");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO users (id) VALUES (1)")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id) VALUES (2)")
+            .expect("insert row");
+
+        let result = db
+            .execute("SELECT (SELECT COUNT(*) FROM users)")
+            .expect("select");
+        assert_eq!(result.rows, vec![vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn execute_correlated_scalar_subquery_per_outer_row() {
+        let path = temp_db_path("execute_correlated_scalar_subquery");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO users (id) VALUES (1)")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id) VALUES (2)")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id) VALUES (3)")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT id, (SELECT COUNT(*) FROM users u2 WHERE u2.id <= users.id) \
+                 FROM users ORDER BY id",
+            )
+            .expect("select");
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(1), Value::Integer(1)],
+                vec![Value::Integer(2), Value::Integer(2)],
+                vec![Value::Integer(3), Value::Integer(3)],
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_exists_returns_true_when_rows_present() {
+        let path = temp_db_path("execute_exists_rows_present");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO users (id) VALUES (1)")
+            .expect("insert row");
+
+        let result = db
+            .execute("SELECT EXISTS (SELECT id FROM users)")
+            .expect("select");
+        assert_eq!(result.rows, vec![vec![Value::Boolean(true)]]);
+    }
+
+    #[test]
+    fn execute_exists_with_correlation_filters_rows() {
+        let path = temp_db_path("execute_exists_correlated");
+        let mut db =
+            Database::create(path.to_string_lossy().as_ref()).expect("create should succeed");
+        db.execute("CREATE TABLE users (id INTEGER)")
+            .expect("create table");
+        db.execute("INSERT INTO users (id) VALUES (1)")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id) VALUES (2)")
+            .expect("insert row");
+        db.execute("INSERT INTO users (id) VALUES (3)")
+            .expect("insert row");
+
+        let result = db
+            .execute(
+                "SELECT u1.id, \
+                 EXISTS (SELECT 1 FROM users u2 WHERE u2.id = u1.id AND u2.id > 1) \
+                 FROM users u1 ORDER BY u1.id",
+            )
+            .expect("select");
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(1), Value::Boolean(false)],
+                vec![Value::Integer(2), Value::Boolean(true)],
+                vec![Value::Integer(3), Value::Boolean(true)],
+            ]
+        );
+    }
+
+    #[test]
     fn execute_select_scans_multiple_heap_pages() {
         let path = temp_db_path("execute_select_scan_multiple_pages");
         let mut db =

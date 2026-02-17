@@ -1,0 +1,12 @@
+name: lexer-add-is-keyword
+description: >
+  Add `IS` as a SQL keyword token for expression parsing.
+
+story_points: 1
+
+acceptence_critria:
+  - IS is tokenized as a keyword
+  - Existing lexing tests pass
+
+  - Unit tests added for this task
+deppends_on: []

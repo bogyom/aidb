@@ -1,6 +1,7 @@
 use super::lexer::Literal as AstLiteral;
 use super::parser::{
-    Expr as AstExpr, OrderDirection, Select, SelectItem, Statement, UnaryOp as AstUnaryOp,
+    Expr as AstExpr, FunctionArg as AstFunctionArg, OrderDirection, Select, SelectItem,
+    Statement, UnaryOp as AstUnaryOp,
 };
 use super::parser::BinaryOp as AstBinaryOp;
 use crate::{Catalog, SqlType, TableSchema, Value};
@@ -15,7 +16,7 @@ pub enum PlanNode {
     Values { rows: Vec<Vec<Value>> },
     Scan(TableScan),
     Filter { predicate: ExprPlan, input: Box<PlanNode> },
-    Order { by: OrderByPlan, input: Box<PlanNode> },
+    Order { by: Vec<OrderByPlan>, input: Box<PlanNode> },
     Limit { limit: usize, input: Box<PlanNode> },
     Projection { items: Vec<ProjectionItem>, input: Box<PlanNode> },
 }
@@ -38,6 +39,7 @@ pub struct ProjectionItem {
     pub expr: ExprPlan,
     pub label: String,
     pub sql_type: SqlType,
+    pub is_aggregate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,18 +54,49 @@ pub enum ExprPlan {
     Literal(Value),
     Unary { op: UnaryOp, expr: Box<ExprPlan> },
     Binary { left: Box<ExprPlan>, op: BinaryOp, right: Box<ExprPlan> },
+    Between {
+        expr: Box<ExprPlan>,
+        low: Box<ExprPlan>,
+        high: Box<ExprPlan>,
+        negated: bool,
+    },
+    Case {
+        operand: Option<Box<ExprPlan>>,
+        when_thens: Vec<(ExprPlan, ExprPlan)>,
+        else_expr: Option<Box<ExprPlan>>,
+    },
+    Function { name: String, args: Vec<FunctionArgPlan> },
+    Subquery(Box<Select>),
+    Exists(Box<Select>),
+    IsNull { expr: Box<ExprPlan>, negated: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Not,
+    Neg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Eq,
+    NotEq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Add,
+    Sub,
+    Mul,
+    Div,
     And,
     Or,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FunctionArgPlan {
+    Expr(ExprPlan),
+    Star,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,13 +144,17 @@ pub fn plan_select(select: &Select, catalog: &Catalog) -> Result<Plan, PlanError
         };
     }
 
-    if let Some(order_by) = select.order_by.first() {
-        let expr = plan_expr(&order_by.expr, table)?;
-        node = PlanNode::Order {
-            by: OrderByPlan {
+    if !select.order_by.is_empty() {
+        let mut by = Vec::with_capacity(select.order_by.len());
+        for order_by in &select.order_by {
+            let expr = plan_order_expr(&order_by.expr, &select.items, table)?;
+            by.push(OrderByPlan {
                 expr,
                 direction: order_by.direction.clone(),
-            },
+            });
+        }
+        node = PlanNode::Order {
+            by,
             input: Box::new(node),
         };
     }
@@ -161,6 +198,7 @@ fn plan_projection_items(
                         label: column.name.clone(),
                         sql_type: column.sql_type,
                         expr: ExprPlan::Column(column),
+                        is_aggregate: false,
                     });
                 }
             }
@@ -168,15 +206,40 @@ fn plan_projection_items(
                 let planned_expr = plan_expr(expr, table)?;
                 let sql_type = expr_plan_type(&planned_expr);
                 let label = label_for_expr(&planned_expr);
+                let is_aggregate = expr_contains_aggregate(&planned_expr);
                 planned.push(ProjectionItem {
                     label,
                     sql_type,
                     expr: planned_expr,
+                    is_aggregate,
                 });
             }
         }
     }
     Ok(planned)
+}
+
+fn plan_order_expr(
+    expr: &AstExpr,
+    items: &[SelectItem],
+    table: Option<&TableSchema>,
+) -> Result<ExprPlan, PlanError> {
+    if let AstExpr::Literal(AstLiteral::Number(raw)) = expr {
+        if !raw.contains('.') {
+            if let Ok(index) = raw.parse::<usize>() {
+                if index == 0 || index > items.len() {
+                    return Err(PlanError::new("ORDER BY position out of range"));
+                }
+                return match &items[index - 1] {
+                    SelectItem::Expr(expr) => plan_expr(expr, table),
+                    SelectItem::Wildcard(_) => Err(PlanError::new(
+                        "ORDER BY position refers to wildcard select item",
+                    )),
+                };
+            }
+        }
+    }
+    plan_expr(expr, table)
 }
 
 fn label_for_expr(expr: &ExprPlan) -> String {
@@ -190,6 +253,47 @@ fn label_for_expr(expr: &ExprPlan) -> String {
             Value::Boolean(v) => v.to_string(),
         },
         _ => "expr".to_string(),
+    }
+}
+
+fn expr_contains_aggregate(expr: &ExprPlan) -> bool {
+    match expr {
+        ExprPlan::Function { name, .. } => {
+            let name = name.to_ascii_lowercase();
+            name == "count" || name == "avg"
+        }
+        ExprPlan::Unary { expr, .. } => expr_contains_aggregate(expr),
+        ExprPlan::Binary { left, right, .. } => {
+            expr_contains_aggregate(left) || expr_contains_aggregate(right)
+        }
+        ExprPlan::Between {
+            expr,
+            low,
+            high,
+            ..
+        } => {
+            expr_contains_aggregate(expr)
+                || expr_contains_aggregate(low)
+                || expr_contains_aggregate(high)
+        }
+        ExprPlan::Case {
+            operand,
+            when_thens,
+            else_expr,
+        } => {
+            operand
+                .as_ref()
+                .map_or(false, |expr| expr_contains_aggregate(expr))
+                || when_thens.iter().any(|(when_expr, then_expr)| {
+                    expr_contains_aggregate(when_expr) || expr_contains_aggregate(then_expr)
+                })
+                || else_expr
+                    .as_ref()
+                    .map_or(false, |expr| expr_contains_aggregate(expr))
+        }
+        ExprPlan::IsNull { expr, .. } => expr_contains_aggregate(expr),
+        ExprPlan::Subquery(_) | ExprPlan::Exists(_) => false,
+        ExprPlan::Column(_) | ExprPlan::Literal(_) => false,
     }
 }
 
@@ -233,7 +337,7 @@ fn plan_expr(expr: &AstExpr, table: Option<&TableSchema>) -> Result<ExprPlan, Pl
             let expr = plan_expr(expr, table)?;
             let op = match op {
                 AstUnaryOp::Not => UnaryOp::Not,
-                _ => return Err(PlanError::new("unsupported unary operator")),
+                AstUnaryOp::Neg => UnaryOp::Neg,
             };
             Ok(ExprPlan::Unary {
                 op,
@@ -245,17 +349,84 @@ fn plan_expr(expr: &AstExpr, table: Option<&TableSchema>) -> Result<ExprPlan, Pl
             let right = plan_expr(right, table)?;
             let op = match op {
                 AstBinaryOp::Eq => BinaryOp::Eq,
+                AstBinaryOp::NotEq => BinaryOp::NotEq,
+                AstBinaryOp::Lt => BinaryOp::Lt,
+                AstBinaryOp::Lte => BinaryOp::Lte,
+                AstBinaryOp::Gt => BinaryOp::Gt,
+                AstBinaryOp::Gte => BinaryOp::Gte,
+                AstBinaryOp::Add => BinaryOp::Add,
+                AstBinaryOp::Sub => BinaryOp::Sub,
+                AstBinaryOp::Mul => BinaryOp::Mul,
+                AstBinaryOp::Div => BinaryOp::Div,
                 AstBinaryOp::And => BinaryOp::And,
                 AstBinaryOp::Or => BinaryOp::Or,
-                _ => return Err(PlanError::new("unsupported binary operator")),
             };
+            ensure_comparable(&op, &left, &right)?;
             Ok(ExprPlan::Binary {
                 left: Box::new(left),
                 op,
                 right: Box::new(right),
             })
         }
-        _ => Err(PlanError::new("unsupported expression")),
+        AstExpr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => Ok(ExprPlan::Between {
+            expr: Box::new(plan_expr(expr, table)?),
+            low: Box::new(plan_expr(low, table)?),
+            high: Box::new(plan_expr(high, table)?),
+            negated: *negated,
+        }),
+        AstExpr::Case {
+            operand,
+            when_thens,
+            else_expr,
+        } => {
+            let operand = operand
+                .as_ref()
+                .map(|expr| plan_expr(expr, table).map(Box::new))
+                .transpose()?;
+            let mut planned_when_thens = Vec::with_capacity(when_thens.len());
+            for (when_expr, then_expr) in when_thens {
+                planned_when_thens.push((
+                    plan_expr(when_expr, table)?,
+                    plan_expr(then_expr, table)?,
+                ));
+            }
+            let else_expr = else_expr
+                .as_ref()
+                .map(|expr| plan_expr(expr, table).map(Box::new))
+                .transpose()?;
+            Ok(ExprPlan::Case {
+                operand,
+                when_thens: planned_when_thens,
+                else_expr,
+            })
+        }
+        AstExpr::Function { name, args } => {
+            let mut planned_args = Vec::with_capacity(args.len());
+            for arg in args {
+                match arg {
+                    AstFunctionArg::Expr(expr) => {
+                        planned_args.push(FunctionArgPlan::Expr(plan_expr(expr, table)?));
+                    }
+                    AstFunctionArg::Star => planned_args.push(FunctionArgPlan::Star),
+                }
+            }
+            validate_function_arity(name, &planned_args)?;
+            Ok(ExprPlan::Function {
+                name: name.clone(),
+                args: planned_args,
+            })
+        }
+        AstExpr::Subquery(select) => Ok(ExprPlan::Subquery(select.clone())),
+        AstExpr::Exists(select) => Ok(ExprPlan::Exists(select.clone())),
+        AstExpr::IsNull { expr, negated } => Ok(ExprPlan::IsNull {
+            expr: Box::new(plan_expr(expr, table)?),
+            negated: *negated,
+        }),
     }
 }
 
@@ -270,6 +441,101 @@ fn resolve_column(table: &TableSchema, name: &str) -> Result<ColumnRef, PlanErro
             sql_type: table.columns[index].sql_type,
         })
         .ok_or_else(|| PlanError::new("unknown column"))
+}
+
+fn validate_function_arity(
+    name: &str,
+    args: &[FunctionArgPlan],
+) -> Result<(), PlanError> {
+    let lower = name.to_ascii_lowercase();
+    if lower == "abs" {
+        if args.len() != 1 {
+            return Err(PlanError::new("ABS expects 1 argument"));
+        }
+        if matches!(args[0], FunctionArgPlan::Star) {
+            return Err(PlanError::new("ABS does not accept '*'"));
+        }
+    } else if lower == "count" {
+        if args.len() != 1 {
+            return Err(PlanError::new("COUNT expects 1 argument"));
+        }
+    } else if lower == "avg" {
+        if args.len() != 1 {
+            return Err(PlanError::new("AVG expects 1 argument"));
+        }
+        if matches!(args[0], FunctionArgPlan::Star) {
+            return Err(PlanError::new("AVG does not accept '*'"));
+        }
+    } else if lower == "coalesce" {
+        if args.is_empty() {
+            return Err(PlanError::new("COALESCE expects at least 1 argument"));
+        }
+        if args.iter().any(|arg| matches!(arg, FunctionArgPlan::Star)) {
+            return Err(PlanError::new("COALESCE does not accept '*'"));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_comparable(
+    op: &BinaryOp,
+    left: &ExprPlan,
+    right: &ExprPlan,
+) -> Result<(), PlanError> {
+    let is_comparison = matches!(
+        op,
+        BinaryOp::Eq
+            | BinaryOp::NotEq
+            | BinaryOp::Lt
+            | BinaryOp::Lte
+            | BinaryOp::Gt
+            | BinaryOp::Gte
+    );
+    if !is_comparison {
+        return Ok(());
+    }
+
+    let left_type = comparison_operand_type(left);
+    let right_type = comparison_operand_type(right);
+
+    if left_type.is_none() || right_type.is_none() {
+        return Ok(());
+    }
+
+    let left_type = left_type.unwrap();
+    let right_type = right_type.unwrap();
+    let comparable = match op {
+        BinaryOp::Eq | BinaryOp::NotEq => types_compatible_eq(left_type, right_type),
+        BinaryOp::Lt | BinaryOp::Lte | BinaryOp::Gt | BinaryOp::Gte => {
+            types_compatible_order(left_type, right_type)
+        }
+        _ => true,
+    };
+
+    if comparable {
+        Ok(())
+    } else {
+        Err(PlanError::new(format!(
+            "unsupported comparison between {:?} and {:?}",
+            left_type, right_type
+        )))
+    }
+}
+
+fn comparison_operand_type(expr: &ExprPlan) -> Option<SqlType> {
+    match expr {
+        ExprPlan::Literal(Value::Null) => None,
+        ExprPlan::Subquery(_) => None,
+        _ => Some(expr_plan_type(expr)),
+    }
+}
+
+fn types_compatible_eq(left: SqlType, right: SqlType) -> bool {
+    left == right || matches!((left, right), (SqlType::Integer, SqlType::Real) | (SqlType::Real, SqlType::Integer))
+}
+
+fn types_compatible_order(left: SqlType, right: SqlType) -> bool {
+    left == right || matches!((left, right), (SqlType::Integer, SqlType::Real) | (SqlType::Real, SqlType::Integer))
 }
 
 fn literal_to_value(literal: &AstLiteral) -> Result<Value, PlanError> {
@@ -303,8 +569,66 @@ fn expr_plan_type(expr: &ExprPlan) -> SqlType {
             Value::Boolean(_) => SqlType::Boolean,
             Value::Null => SqlType::Text,
         },
-        ExprPlan::Unary { .. } => SqlType::Boolean,
-        ExprPlan::Binary { .. } => SqlType::Boolean,
+        ExprPlan::Unary { op, expr } => match op {
+            UnaryOp::Not => SqlType::Boolean,
+            UnaryOp::Neg => expr_plan_type(expr),
+        },
+        ExprPlan::Binary { op, left, right } => match op {
+            BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Eq
+            | BinaryOp::NotEq
+            | BinaryOp::Lt
+            | BinaryOp::Lte
+            | BinaryOp::Gt
+            | BinaryOp::Gte => SqlType::Boolean,
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
+                let left = expr_plan_type(left);
+                let right = expr_plan_type(right);
+                if left == SqlType::Real || right == SqlType::Real {
+                    SqlType::Real
+                } else if left == SqlType::Integer && right == SqlType::Integer {
+                    SqlType::Integer
+                } else {
+                    SqlType::Text
+                }
+            }
+            BinaryOp::Div => SqlType::Real,
+        },
+        ExprPlan::Between { .. } => SqlType::Boolean,
+        ExprPlan::IsNull { .. } => SqlType::Boolean,
+        ExprPlan::Exists(_) => SqlType::Boolean,
+        ExprPlan::Case {
+            when_thens,
+            else_expr,
+            ..
+        } => {
+            if let Some((_, then_expr)) = when_thens.first() {
+                expr_plan_type(then_expr)
+            } else if let Some(else_expr) = else_expr {
+                expr_plan_type(else_expr)
+            } else {
+                SqlType::Text
+            }
+        }
+        ExprPlan::Function { name, args } => {
+            let name = name.to_ascii_lowercase();
+            if name == "count" {
+                SqlType::Integer
+            } else if name == "avg" {
+                SqlType::Real
+            } else if name == "abs" {
+                SqlType::Integer
+            } else if name == "coalesce" {
+                args.iter().find_map(|arg| match arg {
+                    FunctionArgPlan::Expr(expr) => Some(expr_plan_type(expr)),
+                    FunctionArgPlan::Star => None,
+                }).unwrap_or(SqlType::Text)
+            } else {
+                SqlType::Text
+            }
+        }
+        ExprPlan::Subquery(_) => SqlType::Text,
     }
 }
 
@@ -313,6 +637,7 @@ mod tests {
     use super::*;
     use crate::{Catalog, ColumnSchema, SqlType, TableSchema};
     use super::super::parser;
+    use std::path::Path;
 
     fn catalog_with_users() -> Catalog {
         let mut catalog = Catalog::new();
@@ -324,6 +649,56 @@ mod tests {
             ],
         ));
         catalog
+    }
+
+    fn catalog_with_t1() -> Catalog {
+        let mut catalog = Catalog::new();
+        catalog.add_table(TableSchema::new(
+            "t1",
+            vec![
+                ColumnSchema::new("a", SqlType::Integer, false),
+                ColumnSchema::new("b", SqlType::Integer, false),
+                ColumnSchema::new("c", SqlType::Integer, false),
+                ColumnSchema::new("d", SqlType::Integer, false),
+                ColumnSchema::new("e", SqlType::Integer, false),
+            ],
+        ));
+        catalog
+    }
+
+    fn load_queries(path: &Path) -> Vec<String> {
+        let contents = std::fs::read_to_string(path).expect("read sqllogictest file");
+        let mut queries = Vec::new();
+        let mut current = Vec::new();
+        let mut in_query = false;
+
+        for line in contents.lines() {
+            let trimmed = line.trim_end();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+
+            if in_query {
+                if trimmed == "----" {
+                    let sql = current.join("\n");
+                    if !sql.trim().is_empty() {
+                        queries.push(sql.trim().to_string());
+                    }
+                    current.clear();
+                    in_query = false;
+                } else if !trimmed.is_empty() {
+                    current.push(trimmed.to_string());
+                }
+                continue;
+            }
+
+            if trimmed.starts_with("query ") {
+                in_query = true;
+                current.clear();
+            }
+        }
+
+        queries
     }
 
     #[test]
@@ -349,6 +724,77 @@ mod tests {
     }
 
     #[test]
+    fn planner_plans_multiple_order_by_keys() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse(
+            "SELECT id, name FROM users ORDER BY id, name DESC",
+        )
+        .expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, &catalog).expect("plan");
+        let order_by = match plan.root {
+            PlanNode::Projection { input, .. } => match *input {
+                PlanNode::Order { by, .. } => by,
+                _ => panic!("expected order"),
+            },
+            _ => panic!("expected projection"),
+        };
+
+        assert_eq!(order_by.len(), 2);
+        match &order_by[0].expr {
+            ExprPlan::Column(column) => assert_eq!(column.name, "id"),
+            _ => panic!("expected column expression"),
+        }
+        assert!(matches!(order_by[0].direction, OrderDirection::Asc));
+
+        match &order_by[1].expr {
+            ExprPlan::Column(column) => assert_eq!(column.name, "name"),
+            _ => panic!("expected column expression"),
+        }
+        assert!(matches!(order_by[1].direction, OrderDirection::Desc));
+    }
+
+    #[test]
+    fn planner_resolves_order_by_ordinal() {
+        let catalog = catalog_with_users();
+        let statements =
+            parser::parse("SELECT id, name FROM users ORDER BY 1").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, &catalog).expect("plan");
+        let order_by = match plan.root {
+            PlanNode::Projection { input, .. } => match *input {
+                PlanNode::Order { by, .. } => by,
+                _ => panic!("expected order"),
+            },
+            _ => panic!("expected projection"),
+        };
+        assert_eq!(order_by.len(), 1);
+        match &order_by[0].expr {
+            ExprPlan::Column(column) => assert_eq!(column.name, "id"),
+            _ => panic!("expected column expression"),
+        }
+    }
+
+    #[test]
+    fn planner_rejects_out_of_range_order_by_ordinal() {
+        let catalog = catalog_with_users();
+        let statements =
+            parser::parse("SELECT id FROM users ORDER BY 2").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let err = plan_select(select, &catalog).expect_err("expected error");
+        assert!(err.message.contains("ORDER BY position out of range"));
+    }
+
+    #[test]
     fn planner_resolves_column_indices() {
         let catalog = catalog_with_users();
         let statements = parser::parse("SELECT name FROM users WHERE id = 1")
@@ -365,6 +811,400 @@ mod tests {
         match &projection[0].expr {
             ExprPlan::Column(column) => assert_eq!(column.index, 1),
             _ => panic!("expected column"),
+        }
+    }
+
+    fn planned_filter_op(sql: &str, catalog: &Catalog) -> BinaryOp {
+        let statements = parser::parse(sql).expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, catalog).expect("plan");
+        let predicate = match plan.root {
+            PlanNode::Projection { input, .. } => match *input {
+                PlanNode::Filter { predicate, .. } => predicate,
+                _ => panic!("expected filter"),
+            },
+            _ => panic!("expected projection"),
+        };
+        match predicate {
+            ExprPlan::Binary { op, .. } => op,
+            _ => panic!("expected binary predicate"),
+        }
+    }
+
+    #[test]
+    fn planner_plans_comparison_ops() {
+        let catalog = catalog_with_users();
+        let cases = vec![
+            ("SELECT name FROM users WHERE id = 1", BinaryOp::Eq),
+            ("SELECT name FROM users WHERE id <> 1", BinaryOp::NotEq),
+            ("SELECT name FROM users WHERE id < 1", BinaryOp::Lt),
+            ("SELECT name FROM users WHERE id <= 1", BinaryOp::Lte),
+            ("SELECT name FROM users WHERE id > 1", BinaryOp::Gt),
+            ("SELECT name FROM users WHERE id >= 1", BinaryOp::Gte),
+        ];
+
+        for (sql, expected) in cases {
+            let op = planned_filter_op(sql, &catalog);
+            assert_eq!(op, expected);
+        }
+    }
+
+    #[test]
+    fn planner_rejects_incompatible_comparison() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse("SELECT name FROM users WHERE name < id").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let err = plan_select(select, &catalog).expect_err("expected error");
+        assert!(err.message.contains("unsupported comparison"));
+    }
+
+    #[test]
+    fn planner_respects_arithmetic_precedence() {
+        let catalog = catalog_with_t1();
+        let statements = parser::parse("SELECT a + b * c FROM t1").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, &catalog).expect("plan");
+        let projection = match plan.root {
+            PlanNode::Projection { items, .. } => items,
+            _ => panic!("expected projection"),
+        };
+        let expr = &projection[0].expr;
+        match expr {
+            ExprPlan::Binary { op, left, right } => {
+                assert_eq!(*op, BinaryOp::Add);
+                assert!(matches!(**left, ExprPlan::Column(_)));
+                match &**right {
+                    ExprPlan::Binary {
+                        op,
+                        left: mul_left,
+                        right: mul_right,
+                    } => {
+                        assert_eq!(*op, BinaryOp::Mul);
+                        assert!(matches!(**mul_left, ExprPlan::Column(_)));
+                        assert!(matches!(**mul_right, ExprPlan::Column(_)));
+                    }
+                    _ => panic!("expected multiplication on right"),
+                }
+            }
+            _ => panic!("expected binary expression"),
+        }
+    }
+
+    #[test]
+    fn planner_supports_unary_negation() {
+        let catalog = catalog_with_t1();
+        let statements = parser::parse("SELECT -a FROM t1").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, &catalog).expect("plan");
+        let projection = match plan.root {
+            PlanNode::Projection { items, .. } => items,
+            _ => panic!("expected projection"),
+        };
+        match &projection[0].expr {
+            ExprPlan::Unary { op, expr } => {
+                assert_eq!(*op, UnaryOp::Neg);
+                assert!(matches!(**expr, ExprPlan::Column(_)));
+            }
+            _ => panic!("expected unary negation"),
+        }
+    }
+
+    fn planned_filter_expr(sql: &str, catalog: &Catalog) -> ExprPlan {
+        let statements = parser::parse(sql).expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, catalog).expect("plan");
+        match plan.root {
+            PlanNode::Projection { input, .. } => match *input {
+                PlanNode::Filter { predicate, .. } => predicate,
+                _ => panic!("expected filter"),
+            },
+            _ => panic!("expected projection"),
+        }
+    }
+
+    fn planned_projection_expr(sql: &str, catalog: &Catalog) -> ExprPlan {
+        let statements = parser::parse(sql).expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, catalog).expect("plan");
+        match plan.root {
+            PlanNode::Projection { items, .. } => items
+                .into_iter()
+                .next()
+                .expect("expected projection item")
+                .expr,
+            _ => panic!("expected projection"),
+        }
+    }
+
+    fn planned_projection_item(sql: &str, catalog: &Catalog) -> ProjectionItem {
+        let statements = parser::parse(sql).expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, catalog).expect("plan");
+        match plan.root {
+            PlanNode::Projection { items, .. } => items
+                .into_iter()
+                .next()
+                .expect("expected projection item"),
+            _ => panic!("expected projection"),
+        }
+    }
+
+    #[test]
+    fn planner_plans_between_expressions() {
+        let catalog = catalog_with_users();
+        let expr = planned_filter_expr("SELECT name FROM users WHERE id BETWEEN 1 AND 3", &catalog);
+        match expr {
+            ExprPlan::Between { expr, low, high, negated } => {
+                assert!(!negated);
+                assert!(matches!(*expr, ExprPlan::Column(_)));
+                assert!(matches!(*low, ExprPlan::Literal(Value::Integer(1))));
+                assert!(matches!(*high, ExprPlan::Literal(Value::Integer(3))));
+            }
+            _ => panic!("expected BETWEEN expression"),
+        }
+    }
+
+    #[test]
+    fn planner_plans_not_between_expressions() {
+        let catalog = catalog_with_users();
+        let expr = planned_filter_expr("SELECT name FROM users WHERE id NOT BETWEEN 1 AND 3", &catalog);
+        match expr {
+            ExprPlan::Between { negated, .. } => assert!(negated),
+            _ => panic!("expected NOT BETWEEN expression"),
+        }
+    }
+
+    #[test]
+    fn planner_plans_abs_function() {
+        let catalog = catalog_with_users();
+        let expr = planned_projection_expr("SELECT ABS(id) FROM users", &catalog);
+        match expr {
+            ExprPlan::Function { name, args } => {
+                assert_eq!(name.to_ascii_lowercase(), "abs");
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("expected function expression"),
+        }
+    }
+
+    #[test]
+    fn planner_plans_coalesce_function() {
+        let catalog = catalog_with_users();
+        let expr =
+            planned_projection_expr("SELECT COALESCE(name, 'n/a') FROM users", &catalog);
+        match expr {
+            ExprPlan::Function { name, args } => {
+                assert_eq!(name.to_ascii_lowercase(), "coalesce");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("expected function expression"),
+        }
+    }
+
+    #[test]
+    fn planner_marks_aggregate_projections() {
+        let catalog = catalog_with_users();
+        let aggregate = planned_projection_item("SELECT COUNT(*) FROM users", &catalog);
+        assert!(aggregate.is_aggregate);
+
+        let scalar = planned_projection_item("SELECT id FROM users", &catalog);
+        assert!(!scalar.is_aggregate);
+    }
+
+    #[test]
+    fn planner_rejects_invalid_count_arity() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse("SELECT COUNT() FROM users").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let err = plan_select(select, &catalog).expect_err("expected error");
+        assert!(err.message.contains("COUNT expects 1 argument"));
+    }
+
+    #[test]
+    fn planner_rejects_invalid_avg_arity() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse("SELECT AVG(*) FROM users").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let err = plan_select(select, &catalog).expect_err("expected error");
+        assert!(err.message.contains("AVG does not accept '*'"));
+    }
+
+    #[test]
+    fn planner_plans_scalar_subquery_expression() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse("SELECT (SELECT 1) FROM users").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, &catalog).expect("plan");
+        let projection = match plan.root {
+            PlanNode::Projection { items, .. } => items,
+            _ => panic!("expected projection"),
+        };
+        match &projection[0].expr {
+            ExprPlan::Subquery(_) => {}
+            _ => panic!("expected subquery expression"),
+        }
+    }
+
+    #[test]
+    fn planner_plans_exists_subquery_expression() {
+        let catalog = catalog_with_users();
+        let statements =
+            parser::parse("SELECT name FROM users WHERE EXISTS (SELECT 1)").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, &catalog).expect("plan");
+        let predicate = match plan.root {
+            PlanNode::Projection { input, .. } => match *input {
+                PlanNode::Filter { predicate, .. } => predicate,
+                _ => panic!("expected filter"),
+            },
+            _ => panic!("expected projection"),
+        };
+        match predicate {
+            ExprPlan::Exists(_) => {}
+            _ => panic!("expected exists expression"),
+        }
+    }
+
+    #[test]
+    fn planner_rejects_invalid_abs_arity() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse("SELECT ABS(id, name) FROM users").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let err = plan_select(select, &catalog).expect_err("expected error");
+        assert!(err.message.contains("ABS expects 1 argument"));
+    }
+
+    #[test]
+    fn planner_rejects_invalid_coalesce_arity() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse("SELECT COALESCE() FROM users").expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let err = plan_select(select, &catalog).expect_err("expected error");
+        assert!(err.message.contains("COALESCE expects at least 1 argument"));
+    }
+
+    #[test]
+    fn planner_plans_searched_case_expression() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse(
+            "SELECT CASE WHEN id > 1 THEN name ELSE 'n/a' END FROM users",
+        )
+        .expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, &catalog).expect("plan");
+        let projection = match plan.root {
+            PlanNode::Projection { items, .. } => items,
+            _ => panic!("expected projection"),
+        };
+        match &projection[0].expr {
+            ExprPlan::Case {
+                operand,
+                when_thens,
+                else_expr,
+            } => {
+                assert!(operand.is_none());
+                assert_eq!(when_thens.len(), 1);
+                assert!(else_expr.is_some());
+            }
+            _ => panic!("expected case expression"),
+        }
+    }
+
+    #[test]
+    fn planner_plans_simple_case_expression() {
+        let catalog = catalog_with_users();
+        let statements = parser::parse(
+            "SELECT CASE id WHEN 1 THEN name ELSE 'n/a' END FROM users",
+        )
+        .expect("parse");
+        let select = match &statements[0] {
+            Statement::Select(select) => select,
+            _ => panic!("expected select"),
+        };
+        let plan = plan_select(select, &catalog).expect("plan");
+        let projection = match plan.root {
+            PlanNode::Projection { items, .. } => items,
+            _ => panic!("expected projection"),
+        };
+        match &projection[0].expr {
+            ExprPlan::Case {
+                operand,
+                when_thens,
+                else_expr,
+            } => {
+                assert!(operand.is_some());
+                assert_eq!(when_thens.len(), 1);
+                assert!(else_expr.is_some());
+            }
+            _ => panic!("expected case expression"),
+        }
+    }
+
+    #[test]
+    fn planner_compiles_select2_and_select3_queries() {
+        let catalog = catalog_with_t1();
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let base = manifest_dir.join("../tests/sqllogictest/test");
+        let files = ["select2.test", "select3.test"];
+
+        for file in files {
+            let path = base.join(file);
+            let queries = load_queries(&path);
+            assert!(!queries.is_empty(), "no queries loaded from {}", path.display());
+            for sql in queries {
+                let statements = parser::parse(&sql).unwrap_or_else(|err| {
+                    panic!("failed to parse {}: {} ({:?})", file, sql, err)
+                });
+                for stmt in statements {
+                    if let Statement::Select(select) = stmt {
+                        plan_select(&select, &catalog).unwrap_or_else(|err| {
+                            panic!("failed to plan {}: {} ({})", file, sql, err.message)
+                        });
+                    }
+                }
+            }
         }
     }
 }

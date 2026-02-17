@@ -1,0 +1,14 @@
+name: executor-functions
+description: >
+  Implement runtime evaluation for ABS and COALESCE.
+
+story_points: 2
+
+acceptence_critria:
+  - ABS returns absolute value for numeric inputs
+  - COALESCE returns first non-NULL value
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00038
+  - task_00041

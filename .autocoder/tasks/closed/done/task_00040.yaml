@@ -1,0 +1,13 @@
+name: planner-subquery-expr
+description: >
+  Plan scalar subquery and EXISTS expressions.
+
+story_points: 3
+
+acceptence_critria:
+  - Scalar subqueries are represented in ExprPlan
+  - EXISTS subqueries are represented in ExprPlan
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00033

@@ -1,0 +1,13 @@
+name: planner-orderby-multikey
+description: >
+  Plan multiple ORDER BY expressions.
+
+story_points: 2
+
+acceptence_critria:
+  - ORDER BY supports multiple keys
+  - Each key is planned as an expression
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00033

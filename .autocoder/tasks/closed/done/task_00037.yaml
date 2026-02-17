@@ -1,0 +1,13 @@
+name: planner-case-expr
+description: >
+  Plan searched and simple CASE expressions.
+
+story_points: 2
+
+acceptence_critria:
+  - CASE WHEN ... THEN ... ELSE ... END is planned
+  - CASE expr WHEN ... THEN ... END is planned
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00033

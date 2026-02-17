@@ -1,0 +1,13 @@
+name: parser-is-null-expr
+description: >
+  Parse `expr IS NULL` and `expr IS NOT NULL` into the AST.
+
+story_points: 2
+
+acceptence_critria:
+  - Parser accepts IS NULL / IS NOT NULL in WHERE and SELECT
+  - AST nodes represent IS NULL checks
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00031

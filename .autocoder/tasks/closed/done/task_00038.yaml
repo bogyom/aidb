@@ -1,0 +1,13 @@
+name: planner-function-expr
+description: >
+  Plan scalar functions ABS(expr) and COALESCE(args...).
+
+story_points: 2
+
+acceptence_critria:
+  - ABS and COALESCE are planned as function expressions
+  - Invalid arity is rejected
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00033

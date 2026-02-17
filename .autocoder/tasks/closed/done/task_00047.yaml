@@ -1,0 +1,14 @@
+name: executor-aggregate-avg
+description: >
+  Execute AVG(expr) aggregation with NULL handling.
+
+story_points: 3
+
+acceptence_critria:
+  - AVG ignores NULLs
+  - AVG returns NULL when all inputs are NULL
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00039
+  - task_00046

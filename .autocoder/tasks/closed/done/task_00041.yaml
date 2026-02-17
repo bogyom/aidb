@@ -1,0 +1,13 @@
+name: executor-null-logic
+description: >
+  Implement SQL NULL semantics for boolean logic and comparisons.
+
+story_points: 3
+
+acceptence_critria:
+  - Comparisons with NULL return NULL
+  - WHERE predicates treat NULL as false
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00034

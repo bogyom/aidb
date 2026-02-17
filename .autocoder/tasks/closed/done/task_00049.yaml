@@ -1,0 +1,14 @@
+name: executor-subquery-exists
+description: >
+  Execute EXISTS subqueries with correlation support.
+
+story_points: 3
+
+acceptence_critria:
+  - EXISTS returns true if subquery yields any rows
+  - EXISTS respects correlation predicates
+
+  - Unit tests added for this task
+deppends_on:
+  - task_00040
+  - task_00041
